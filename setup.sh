@@ -70,19 +70,28 @@ PYTHONPATH="$SWIG_LIB" \
 DYLD_LIBRARY_PATH="$PJPROJECT_DIR/pjlib/lib:$PJPROJECT_DIR/pjlib-util/lib:$PJPROJECT_DIR/pjnath/lib:$PJPROJECT_DIR/pjmedia/lib:$PJPROJECT_DIR/pjsip/lib:$PJPROJECT_DIR/third_party/lib:$OPENSSL_PREFIX/lib" \
   "$PYTHON_BIN" -c "import pjsua2; print('pjsua2 import OK')"
 
+# create voice.env from the template if it doesn't exist yet (you fill in creds)
+if [ ! -f "$APP/voice.env" ]; then
+  cp "$APP/voice.env.example" "$APP/voice.env"
+  echo "Created $APP/voice.env — edit it with your SIP account."
+fi
+
 cat <<EOF
 
 Setup complete.
 
 Next steps:
-  1. cp voice.env.example voice.env   # then fill in your SIP account
-  2. Register the MCP with your client (see README.md), e.g.:
+  1. Edit voice.env (already created for you) and fill in your 3 required SIP
+     vars: VOICE_SIP_ID, VOICE_SIP_USER, VOICE_SIP_PASS
+     (get a free account at https://subscribe.linphone.org).
+  2. Register phone-voice with your MCP client:
 
      claude mcp add phone-voice --scope user -- "$APP/run_voice_mcp.sh"
 
-  3. (For phone-alert) copy the vars you want from alert.env.example into your
-     MCP client's env block — see README. phone-alert runs via 'uv run server.py'
-     (uv was installed above); there is no file to source.
+  3. Test: in a fresh Claude session, say "use phone-voice to call me and say hi".
+
+  (phone-alert is optional — copy vars from alert.env.example into your MCP
+   client's env block; it runs via 'uv run server.py', no file to source.)
 
 If your python differs from the one above, set PYTHON_BIN and re-run.
 The whisper model is at: $MODEL_DIR/$WHISPER_MODEL_NAME

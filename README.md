@@ -44,11 +44,12 @@ The LLM calls `call_start` once, then `converse(...)` for each turn. Plain alert
 
 ```bash
 git clone https://github.com/mohitbadwal/ringback && cd ringback
-./setup.sh                         # installs EVERYTHING: toolchain, pjsua2, whisper model, deps
-cp voice.env.example voice.env     # add your free Linphone SIP account
+./setup.sh        # installs EVERYTHING (toolchain, pjsua2, whisper model, deps) + creates voice.env
+# edit voice.env → add your 3 SIP vars (free account: https://subscribe.linphone.org), then:
+claude mcp add phone-voice --scope user -- "$PWD/run_voice_mcp.sh"
 ```
 
-Then register with your MCP client (see [Register](#register-with-your-mcp-client)). Run `./setup.sh` **before** registering — it's the one-shot installer.
+Full walkthrough + env-var reference: **[Set up phone-voice](#set-up-phone-voice--4-steps)** below.
 
 ---
 
@@ -87,58 +88,65 @@ phone-alert is simpler: it shells out to `ntfy`/Pushover HTTP and/or `baresip` f
 
 ---
 
-## Install
+## Set up phone-voice — 4 steps
 
+**1. Clone + install everything:**
 ```bash
 git clone https://github.com/mohitbadwal/ringback && cd ringback
 ./setup.sh
 ```
+`setup.sh` installs the toolchain, **compiles pjsua2 from source** (~20–30 min — no Homebrew formula exists for the bindings), downloads the whisper model, installs deps, **and creates `voice.env` for you**. Safe to re-run. (Override `PYTHON_BIN` / `PJPROJECT_DIR` / `WHISPER_MODEL_NAME` if your layout differs.)
 
-`setup.sh` installs the toolchain (swig, openssl@3, ffmpeg, whisper-cpp, baresip), **compiles pjproject + the pjsua2 Python bindings from source** (~20–30 min; there is no Homebrew formula for the bindings), downloads a whisper model, and installs the Python deps. It's safe to re-run.
+**2. Get a free SIP account** (this is the phone that rings):
+- Sign up at **<https://subscribe.linphone.org>** (or tap *Create account* in the Linphone app). You get a **username** and **password**; your address is `sip:<username>@sip.linphone.org`.
+- Install the **Linphone app on your iPhone**, sign in, and confirm it shows **Connected**.
 
-> Override `PYTHON_BIN`, `PJPROJECT_DIR`, or `WHISPER_MODEL_NAME` as env vars if your layout differs.
-
----
-
-## Configure
-
-**phone-voice** — copy the template and fill in your SIP account:
+**3. Fill in `voice.env`** (already created by setup.sh — just edit it). Only **three** vars are required:
 ```bash
-cp voice.env.example voice.env      # gitignored; holds your SIP identity + password
+export VOICE_SIP_ID="sip:yourname@sip.linphone.org"
+export VOICE_SIP_USER="yourname"
+export VOICE_SIP_PASS="your-password"
 ```
 
-**phone-alert** — this server takes its config from the **MCP client's `env` block** (it reads `os.environ` directly; there is no dotenv auto-loading). So you don't create a file — instead, copy the variables you need from `alert.env.example` into your `claude mcp add --env …` flags or the Desktop config `env` object (see the registration section below). Use a **long random** ntfy topic (anyone who knows it can read/publish).
+Full variable reference:
+
+| Variable | Required | Default | What it is |
+|---|:---:|---|---|
+| `VOICE_SIP_ID` | ✅ | — | Your SIP address, e.g. `sip:you@sip.linphone.org` |
+| `VOICE_SIP_USER` | ✅ | — | SIP username (the part before `@`) |
+| `VOICE_SIP_PASS` | ✅ | — | Your SIP password |
+| `VOICE_SIP_CALLEE` | — | = `VOICE_SIP_ID` | Address to call (normally yourself) |
+| `VOICE_SIP_PROXY` | — | `sip:sip.linphone.org;transport=tls` | SIP registrar/proxy |
+| `WHISPER_MODEL` | — | `~/.whisper-models/ggml-small.en.bin` | STT model: `base.en` (fast) · `small.en` (default) · `medium.en` (accurate) |
+| `PJPROJECT_DIR` | — | `~/build/pjproject-2.17` | pjsua2 build dir (auto-detected) |
+| `PYTHON_BIN` | — | `$(command -v python3)` | Python that has pjsua2 (auto-detected) |
+| `OPENSSL_PREFIX` | — | `$(brew --prefix openssl@3)` | OpenSSL libs (auto-detected) |
+
+**4. Register + test:**
+```bash
+claude mcp add phone-voice --scope user -- "$PWD/run_voice_mcp.sh"
+```
+Then in a **fresh** Claude session say: *"Use phone-voice to call me and say hello."* Your phone should ring.
+
+> **Claude Desktop** instead of Code? Add this to `~/Library/Application Support/Claude/claude_desktop_config.json` (absolute path required; restart the app):
+> ```json
+> { "mcpServers": { "phone-voice": { "command": "/absolute/path/to/ringback/run_voice_mcp.sh" } } }
+> ```
 
 ---
 
-## Register with your MCP client
+## Set up phone-alert (optional)
 
-**Claude Code** (user scope = available in every project):
+phone-alert reads its config from the **MCP client's `env` block** (no file to source). Register it with the channels you want:
+
 ```bash
-# voice
-claude mcp add phone-voice --scope user -- "$PWD/run_voice_mcp.sh"
-
-# alert (env passed inline, or via your shell)
+# Claude Code
 claude mcp add phone-alert --scope user \
   --env ALERT_CHANNEL=ntfy \
-  --env NTFY_URL=https://ntfy.sh/your-random-topic \
+  --env NTFY_URL=https://ntfy.sh/your-long-random-topic \
   -- /opt/homebrew/bin/uv --directory "$PWD" run server.py
 ```
-
-**Claude Desktop** — edit `~/Library/Application Support/Claude/claude_desktop_config.json`:
-```json
-{
-  "mcpServers": {
-    "phone-voice": { "command": "/absolute/path/to/run_voice_mcp.sh" },
-    "phone-alert": {
-      "command": "/opt/homebrew/bin/uv",
-      "args": ["--directory", "/absolute/path/to/repo", "run", "server.py"],
-      "env": { "ALERT_CHANNEL": "ntfy", "NTFY_URL": "https://ntfy.sh/your-random-topic" }
-    }
-  }
-}
-```
-Use absolute paths (Desktop launches MCP servers with a minimal PATH). Restart the app.
+See `alert.env.example` for all variables (ntfy / Pushover / SIP ring). Use a **long random** ntfy topic — anyone who knows it can read/publish.
 
 ---
 
