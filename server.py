@@ -33,7 +33,7 @@ from collections import deque
 import httpx
 from mcp.server.fastmcp import FastMCP
 
-mcp = FastMCP("phone-alert")
+mcp = FastMCP("ringback-alert")
 
 # --------------------------------------------------------------------------- #
 # Config (all from environment — never hardcode secrets in this file)
@@ -245,8 +245,8 @@ def alert_test() -> str:
     receives pushes before relying on alert_me for real conditions.
     """
     return _dispatch(
-        message="phone-alert MCP connectivity test - if you see this, setup works.",
-        title="phone-alert test",
+        message="ringback-alert MCP connectivity test - if you see this, setup works.",
+        title="ringback-alert test",
         severity="info",
     )
 

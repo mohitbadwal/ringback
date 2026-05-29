@@ -1,5 +1,5 @@
 #!/bin/bash
-# Launcher for the phone-voice MCP. Sets up the environment so `import pjsua2`
+# Launcher for the ringback-voice MCP. Sets up the environment so `import pjsua2`
 # (built from source by setup.sh) resolves, then runs the server under the
 # Python that pjsua2 was compiled against.
 #
@@ -24,7 +24,7 @@ OPENSSL_PREFIX="${OPENSSL_PREFIX:-$(brew --prefix openssl@3 2>/dev/null || echo 
 SWIG_LIB="$(ls -d "$PJPROJECT_DIR"/pjsip-apps/src/swig/python/build/lib.* 2>/dev/null | head -1)"
 
 if [ -z "$SWIG_LIB" ] || [ ! -d "$PJPROJECT_DIR/pjlib/lib" ]; then
-  echo "phone-voice: pjsua2 build not found under PJPROJECT_DIR=$PJPROJECT_DIR" >&2
+  echo "ringback-voice: pjsua2 build not found under PJPROJECT_DIR=$PJPROJECT_DIR" >&2
   echo "Run ./setup.sh first (it compiles pjproject + the Python bindings)." >&2
   exit 1
 fi

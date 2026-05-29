@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""phone-voice MCP — exposes a live phone call as speak/listen tools.
+"""ringback-voice MCP — exposes a live phone call as speak/listen tools.
 
 The calling Claude session IS the conversational brain: it calls call_start to
 ring the user, then alternates listen()/speak() each turn, and call_end() when
@@ -13,7 +13,7 @@ import os
 from mcp.server.fastmcp import FastMCP
 import voice_agent
 
-mcp = FastMCP("phone-voice")
+mcp = FastMCP("ringback-voice")
 _session = None
 
 

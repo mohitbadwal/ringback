@@ -1,5 +1,5 @@
 #!/bin/bash
-# setup.sh — one-shot installer for phone-alert / phone-voice on macOS.
+# setup.sh — one-shot installer for ringback-alert / ringback-voice on macOS.
 #
 # Installs the toolchain, compiles pjproject + the pjsua2 Python bindings from
 # source (no Homebrew formula provides them), downloads a whisper model, and
@@ -22,7 +22,7 @@ command -v brew >/dev/null || { echo "Homebrew required: https://brew.sh"; exit 
 [ -n "$PYTHON_BIN" ] || { echo "python3 not found on PATH"; exit 1; }
 
 say_step "1/6 Installing Homebrew packages (swig, openssl@3, ffmpeg, whisper-cpp, baresip, uv)"
-# uv runs the phone-alert server (uv run server.py); the rest are voice deps.
+# uv runs the ringback-alert server (uv run server.py); the rest are voice deps.
 brew install swig openssl@3 ffmpeg whisper-cpp baresip uv
 
 OPENSSL_PREFIX="$(brew --prefix openssl@3)"
@@ -84,13 +84,13 @@ Next steps:
   1. Edit voice.env (already created for you) and fill in your 3 required SIP
      vars: VOICE_SIP_ID, VOICE_SIP_USER, VOICE_SIP_PASS
      (get a free account at https://subscribe.linphone.org).
-  2. Register phone-voice with your MCP client:
+  2. Register ringback-voice with your MCP client:
 
-     claude mcp add phone-voice --scope user -- "$APP/run_voice_mcp.sh"
+     claude mcp add ringback-voice --scope user -- "$APP/run_voice_mcp.sh"
 
-  3. Test: in a fresh Claude session, say "use phone-voice to call me and say hi".
+  3. Test: in a fresh Claude session, say "use ringback-voice to call me and say hi".
 
-  (phone-alert is optional — copy vars from alert.env.example into your MCP
+  (ringback-alert is optional — copy vars from alert.env.example into your MCP
    client's env block; it runs via 'uv run server.py', no file to source.)
 
 If your python differs from the one above, set PYTHON_BIN and re-run.

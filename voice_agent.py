@@ -1,4 +1,4 @@
-"""Voice call engine for phone-alert: pjsua2 + say (TTS) + whisper.cpp (STT).
+"""Voice call engine for ringback-voice: pjsua2 + say (TTS) + whisper.cpp (STT).
 
 Provides CallSession: place a SIP call to the Linphone account, then dynamically
 speak() arbitrary text and listen() to the caller (transcribed). The MCP wraps

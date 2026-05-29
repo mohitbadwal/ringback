@@ -14,14 +14,14 @@
 - 🆓 **Free & self-hosted** — pjsua2 + whisper.cpp + macOS `say` + a free Linphone SIP account. No Twilio, no per-minute fees.
 - 🧠 **No conversation API key** — the calling model is the brain; these tools are just its ears and mouth.
 
-It ships two MCP servers, `phone-alert` and `phone-voice`:
+It ships two MCP servers, `ringback-alert` and `ringback-voice`:
 
 > **Platform:** macOS only. The voice feature uses Apple's `say` (TTS) and CoreAudio via pjsua2.
 
 | Server | Tools | What it does |
 |---|---|---|
-| **phone-alert** | `alert_me`, `alert_test`, `alert_status` | Fire-and-forget notification: a loud push (ntfy / Pushover) and/or a SIP ring + chat message. |
-| **phone-voice** | `call_start`, `converse`, `get_conversation`, `call_end`, … | A real **two-way phone conversation**. Rings your phone; you talk, it transcribes you, the LLM replies in speech. Supports **barge-in** (talk over it and it stops). |
+| **ringback-alert** | `alert_me`, `alert_test`, `alert_status` | Fire-and-forget notification: a loud push (ntfy / Pushover) and/or a SIP ring + chat message. |
+| **ringback-voice** | `call_start`, `converse`, `get_conversation`, `call_end`, … | A real **two-way phone conversation**. Rings your phone; you talk, it transcribes you, the LLM replies in speech. Supports **barge-in** (talk over it and it stops). |
 
 The criteria for *when* to contact you live in the tool descriptions — the calling LLM decides. These servers are just the mechanism.
 
@@ -46,10 +46,10 @@ The LLM calls `call_start` once, then `converse(...)` for each turn. Plain alert
 git clone https://github.com/mohitbadwal/ringback && cd ringback
 ./setup.sh        # installs EVERYTHING (toolchain, pjsua2, whisper model, deps) + creates voice.env
 # edit voice.env → add your 3 SIP vars (free account: https://subscribe.linphone.org), then:
-claude mcp add phone-voice --scope user -- "$PWD/run_voice_mcp.sh"
+claude mcp add ringback-voice --scope user -- "$PWD/run_voice_mcp.sh"
 ```
 
-Full walkthrough + env-var reference: **[Set up phone-voice](#set-up-phone-voice--4-steps)** below.
+Full walkthrough + env-var reference: **[Set up ringback-voice](#set-up-ringback-voice--4-steps)** below.
 
 ---
 
@@ -57,17 +57,17 @@ Full walkthrough + env-var reference: **[Set up phone-voice](#set-up-phone-voice
 
 - **macOS only.** `say` + CoreAudio. No Linux/Windows path today.
 - **Not ChatGPT-realtime.** The voice loop is record → whisper STT → LLM → `say` TTS, so expect **~1–2 s per turn**. It's a reliable walkie-talkie with barge-in, not a streaming realtime voice.
-- **The voice feature depends on GPL software** (pjproject/pjsua2). This repo is Apache-2.0, but redistributing a bundle that links pjsua2 carries GPL obligations — see [`NOTICE`](NOTICE). The phone-alert server is unaffected.
+- **The voice feature depends on GPL software** (pjproject/pjsua2). This repo is Apache-2.0, but redistributing a bundle that links pjsua2 carries GPL obligations — see [`NOTICE`](NOTICE). The ringback-alert server is unaffected.
 - **Your Mac must be awake and online**, and for a voice call a Claude session must be live (it's the brain) for the duration.
 - **Barge-in assumes low acoustic echo** (handset or headset). On speakerphone, the TTS can echo into the mic and false-trigger "interruption." There's no echo cancellation in this path.
-- **iOS push reality:** a self-hosted/free push can't truly pierce Focus/Silent on iPhone except via Pushover's Critical Alerts (paid) — see phone-alert notes below.
+- **iOS push reality:** a self-hosted/free push can't truly pierce Focus/Silent on iPhone except via Pushover's Critical Alerts (paid) — see ringback-alert notes below.
 
 ---
 
 ## Architecture
 
 ```
-  LLM (Claude)  ──MCP tools──▶  phone-voice server (Python)
+  LLM (Claude)  ──MCP tools──▶  ringback-voice server (Python)
                                    │  call_start / converse / listen / speak
                                    ▼
                  pjsua2 (SIP+SRTP, built from source)  ──▶  Linphone SIP server
@@ -76,7 +76,7 @@ Full walkthrough + env-var reference: **[Set up phone-voice](#set-up-phone-voice
                    └───────────────────────────────────▶  your iPhone rings
 ```
 
-phone-alert is simpler: it shells out to `ntfy`/Pushover HTTP and/or `baresip` for a SIP ring + chat message.
+ringback-alert is simpler: it shells out to `ntfy`/Pushover HTTP and/or `baresip` for a SIP ring + chat message.
 
 ---
 
@@ -88,7 +88,7 @@ phone-alert is simpler: it shells out to `ntfy`/Pushover HTTP and/or `baresip` f
 
 ---
 
-## Set up phone-voice — 4 steps
+## Set up ringback-voice — 4 steps
 
 **1. Clone + install everything:**
 ```bash
@@ -124,24 +124,24 @@ Full variable reference:
 
 **4. Register + test:**
 ```bash
-claude mcp add phone-voice --scope user -- "$PWD/run_voice_mcp.sh"
+claude mcp add ringback-voice --scope user -- "$PWD/run_voice_mcp.sh"
 ```
-Then in a **fresh** Claude session say: *"Use phone-voice to call me and say hello."* Your phone should ring.
+Then in a **fresh** Claude session say: *"Use ringback-voice to call me and say hello."* Your phone should ring.
 
 > **Claude Desktop** instead of Code? Add this to `~/Library/Application Support/Claude/claude_desktop_config.json` (absolute path required; restart the app):
 > ```json
-> { "mcpServers": { "phone-voice": { "command": "/absolute/path/to/ringback/run_voice_mcp.sh" } } }
+> { "mcpServers": { "ringback-voice": { "command": "/absolute/path/to/ringback/run_voice_mcp.sh" } } }
 > ```
 
 ---
 
-## Set up phone-alert (optional)
+## Set up ringback-alert (optional)
 
-phone-alert reads its config from the **MCP client's `env` block** (no file to source). Register it with the channels you want:
+ringback-alert reads its config from the **MCP client's `env` block** (no file to source). Register it with the channels you want:
 
 ```bash
 # Claude Code
-claude mcp add phone-alert --scope user \
+claude mcp add ringback-alert --scope user \
   --env ALERT_CHANNEL=ntfy \
   --env NTFY_URL=https://ntfy.sh/your-long-random-topic \
   -- /opt/homebrew/bin/uv --directory "$PWD" run server.py
@@ -150,7 +150,7 @@ See `alert.env.example` for all variables (ntfy / Pushover / SIP ring). Use a **
 
 ---
 
-## Using phone-voice (the conversation)
+## Using ringback-voice (the conversation)
 
 The LLM drives a simple loop:
 
@@ -171,7 +171,7 @@ Whisper model accuracy/speed trade-off (set `WHISPER_MODEL`): `base.en` (fast/ro
 
 ---
 
-## Using phone-alert (notifications)
+## Using ringback-alert (notifications)
 
 `alert_me(message, severity, title)` with `severity` = `info` | `warn` | `critical`. Channels via `ALERT_CHANNEL` (comma list of `ntfy`, `pushover`, `call`):
 
@@ -185,7 +185,7 @@ A built-in rate-limit guard (default 5/60s, per-process) stops a misfiring calle
 
 ## Security
 
-- **SIP credentials** live only in your local, gitignored `voice.env` (and the baresip `accounts` file for phone-alert) — never in the repo or the MCP client config when you can avoid it.
+- **SIP credentials** live only in your local, gitignored `voice.env` (and the baresip `accounts` file for ringback-alert) — never in the repo or the MCP client config when you can avoid it.
 - The voice server only ever **calls the single SIP URI you configure** — it cannot dial arbitrary numbers.
 - Treat ntfy topics as secrets (use a long random topic); don't put sensitive detail in alert bodies on public ntfy.sh.
 - See [`NOTICE`](NOTICE) for the GPL/pjproject licensing caveat before redistributing.

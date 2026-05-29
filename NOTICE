@@ -1,4 +1,4 @@
-ringback — phone-alert / phone-voice MCP servers
+ringback — ringback-alert / ringback-voice MCP servers
 Copyright (c) 2026 the project contributors
 
 This product is licensed under the Apache License, Version 2.0 (the "License");
@@ -36,14 +36,14 @@ THIRD-PARTY COMPONENTS
 Runtime dependencies (installed by setup.sh; NOT bundled in this repo):
 
   PJPROJECT / pjsua2  — GPL-2.0-or-later OR commercial — https://www.pjsip.org
-      Used by phone-voice for the SIP call + media engine.
+      Used by ringback-voice for the SIP call + media engine.
 
   whisper.cpp         — MIT License — https://github.com/ggerganov/whisper.cpp
       Used for on-device speech-to-text. Model files (ggml-*.bin) are
       downloaded from Hugging Face and are not redistributed here.
 
   baresip             — BSD-3-Clause — https://github.com/baresip/baresip
-      Used by phone-alert for the SIP ring + chat message.
+      Used by ringback-alert for the SIP ring + chat message.
 
   ntfy                — Apache-2.0 — https://github.com/binwiederhier/ntfy
       Optional self-hosted push server.
