@@ -1,0 +1,22 @@
+# --- secrets & local config (never commit) ---
+# (comments MUST be on their own line; trailing comments become part of the pattern)
+.env
+# legacy file with personal data — use alert.env.example instead
+.env.example
+# local SIP identity/password — use voice.env.example instead
+voice.env
+alert.env
+
+# --- python ---
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# --- local runtime data ---
+ntfy/*.db
+*.wav
+
+# --- large downloaded artifacts (fetched by setup.sh) ---
+*.bin
+models/

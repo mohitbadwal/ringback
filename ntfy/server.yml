@@ -1,0 +1,24 @@
+# ntfy self-host config (v2 — only needed if you move off public ntfy.sh).
+# Install:  brew install ntfy
+# This file goes at:  /opt/homebrew/etc/ntfy/server.yml
+# Run as a service:   brew services start ntfy
+#
+# IMPORTANT (iOS): upstream-base-url is REQUIRED. Apple forces APNs, so a tiny
+# wake-up poll is relayed through ntfy.sh; your phone then fetches the real
+# message body from this server. Without it, the iOS app won't wake in the
+# background.
+
+# Public URL clients use. Behind Caddy/TLS this is your https domain.
+base-url: "https://ntfy.example.com"
+
+# Listen on localhost only; let Caddy terminate TLS and proxy to it.
+listen-http: "127.0.0.1:2586"
+
+cache-file: "/opt/homebrew/var/lib/ntfy/cache.db"
+auth-file: "/opt/homebrew/var/lib/ntfy/auth.db"
+
+# Lock it down: nobody can publish/subscribe without an explicit grant.
+auth-default-access: "deny-all"
+
+# iOS APNs wake-up relay (do not remove for iPhone delivery).
+upstream-base-url: "https://ntfy.sh"
