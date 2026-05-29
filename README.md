@@ -183,6 +183,17 @@ A built-in rate-limit guard (default 5/60s, per-process) stops a misfiring calle
 
 ---
 
+## Bundled skill: watchdog
+
+[`skills/watchdog/`](skills/watchdog/SKILL.md) is a ready-to-use Claude skill built on these servers. It watches a condition you give it (a CI run, a deploy, a pod, a file) and **escalates only when you're actually away** from the laptop — chat status → chat warning → `ringback-alert` push → `ringback-voice` call — judged by macOS HID idle time. It never interrupts you while you're typing, and de-escalates the moment you touch the keyboard.
+
+```bash
+cp -r skills/watchdog ~/.claude/skills/watchdog   # install for Claude Code
+```
+Then: `/watchdog <what to watch> | priority=<low|medium|critical>` — `low` = chat only, `medium` = may send a phone alert, `critical` = may place a call. Full design in [`skills/watchdog/SKILL.md`](skills/watchdog/SKILL.md).
+
+---
+
 ## Security
 
 - **SIP credentials** live only in your local, gitignored `voice.env` (and the baresip `accounts` file for ringback-alert) — never in the repo or the MCP client config when you can avoid it.
