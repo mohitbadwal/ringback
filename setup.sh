@@ -6,6 +6,10 @@
 # installs the Python deps. Safe to re-run; it skips steps already done.
 #
 # macOS only: the voice feature uses Apple `say` (TTS) and CoreAudio.
+#
+# Thanks to the teammate who debugged the macOS sharp edges end-to-end (the
+# make-target, -std=c++11, OpenSSL flat-namespace, and missing-model issues) —
+# see docs/SETUP_MACOS.md for the full root-cause writeup + symptom→fix table.
 set -euo pipefail
 
 APP="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -21,9 +25,10 @@ say_step() { printf '\n\033[1;36m==> %s\033[0m\n' "$1"; }
 command -v brew >/dev/null || { echo "Homebrew required: https://brew.sh"; exit 1; }
 [ -n "$PYTHON_BIN" ] || { echo "python3 not found on PATH"; exit 1; }
 
-say_step "1/6 Installing Homebrew packages (swig, openssl@3, ffmpeg, whisper-cpp, baresip, uv)"
+say_step "1/6 Installing Homebrew packages (swig, openssl@3, opus, sdl2, ffmpeg, whisper-cpp, baresip, uv)"
+# opus + sdl2 are pjproject media deps also needed if you run fix_macos_twolevel.sh.
 # uv runs the ringback-alert server (uv run server.py); the rest are voice deps.
-brew install swig openssl@3 ffmpeg whisper-cpp baresip uv
+brew install swig openssl@3 opus sdl2 ffmpeg whisper-cpp baresip uv
 
 OPENSSL_PREFIX="$(brew --prefix openssl@3)"
 
@@ -48,7 +53,14 @@ fi
 say_step "4/6 Building pjsua2 Python bindings (for $("$PYTHON_BIN" --version))"
 cd "$PJPROJECT_DIR/pjsip-apps/src/swig/python"
 if ! ls build/lib.*/_pjsua2*.so >/dev/null 2>&1; then
-  make python
+  # pjproject 2.17's bindings build via the default 'all' target — NOT `make python`
+  # (there is no `python` target; `make python` aborts the whole script under set -e,
+  # which then skips the whisper download + voice.env creation below).
+  # -std=c++11 is REQUIRED or the SWIG-generated C++ fails on rvalue refs / nullptr.
+  CFLAGS="-std=c++11 -I$OPENSSL_PREFIX/include -fPIC -O2" \
+  CXXFLAGS="-std=c++11 -I$OPENSSL_PREFIX/include -fPIC -O2" \
+  PATH="$(dirname "$PYTHON_BIN"):$PATH" \
+    make
 fi
 
 say_step "5/6 Downloading whisper model ($WHISPER_MODEL_NAME)"
@@ -58,6 +70,10 @@ if [ ! -f "$MODEL_DIR/$WHISPER_MODEL_NAME" ]; then
   curl -fL --progress-bar "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/$WHISPER_MODEL_NAME" \
     -o "$MODEL_DIR/$WHISPER_MODEL_NAME"
 fi
+# fail loudly if the model isn't there — without it, calls connect but every reply
+# transcribes as [SILENCE]/[unclear].
+[ -f "$MODEL_DIR/$WHISPER_MODEL_NAME" ] \
+  || { echo "ERROR: whisper model missing at $MODEL_DIR/$WHISPER_MODEL_NAME"; exit 1; }
 
 say_step "6/6 Installing Python deps (mcp, httpx) into $PYTHON_BIN"
 # (--break-system-packages fallback for Homebrew/PEP-668 "externally-managed" pythons)
@@ -79,6 +95,17 @@ fi
 cat <<EOF
 
 Setup complete.
+
+⚠️  macOS OpenSSL fix (often REQUIRED — especially with python.org Python):
+    pjproject builds its dylibs with a flat namespace, so inside Python its
+    OpenSSL calls can bind to macOS LibreSSL instead of openssl@3 → calls fail
+    with MCP -32000 (srtp_init) or a segfault (SSL_CTX_new) on connect. If that
+    happens, run the relink helper:
+
+        PJPROJECT_DIR="$PJPROJECT_DIR" "$APP/fix_macos_twolevel.sh"
+
+    (Anaconda Python often avoids the collision and won't need it.) Full
+    root-cause writeup + symptom→fix table: docs/SETUP_MACOS.md
 
 Next steps:
   1. Edit voice.env (already created for you) and fill in your 3 required SIP

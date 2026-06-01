@@ -95,7 +95,9 @@ ringback-alert is simpler: it shells out to `ntfy`/Pushover HTTP and/or `baresip
 git clone https://github.com/mohitbadwal/ringback && cd ringback
 ./setup.sh
 ```
-`setup.sh` installs the toolchain, **compiles pjsua2 from source** (~20–30 min — no Homebrew formula exists for the bindings), downloads the whisper model, installs deps, **and creates `voice.env` for you**. Safe to re-run. (Override `PYTHON_BIN` / `PJPROJECT_DIR` / `WHISPER_MODEL_NAME` if your layout differs.)
+`setup.sh` installs the toolchain, **compiles pjsua2 from source** (~20–30 min — no Homebrew formula exists for the bindings), relinks the pjproject dylibs to a two-level OpenSSL namespace (the macOS fix that makes SIP/SRTP work), downloads the whisper model, installs deps, **and creates `voice.env` for you**. Safe to re-run. (Override `PYTHON_BIN` / `PJPROJECT_DIR` / `WHISPER_MODEL_NAME` if your layout differs.)
+
+> **Hit a snag on macOS?** [`docs/SETUP_MACOS.md`](docs/SETUP_MACOS.md) is a field-tested root-cause + troubleshooting guide (build target, the OpenSSL flat-namespace fix, whisper model, symptom→fix table).
 
 **2. Get a free SIP account** (this is the phone that rings):
 - Sign up at **<https://subscribe.linphone.org>** (or tap *Create account* in the Linphone app). You get a **username** and **password**; your address is `sip:<username>@sip.linphone.org`.
