@@ -29,6 +29,8 @@ SIP_CALLEE = os.environ.get("VOICE_SIP_CALLEE", os.environ.get("VOICE_SIP_ID",
 SIP_USER = os.environ.get("VOICE_SIP_USER", "user")
 SIP_PASS = os.environ.get("VOICE_SIP_PASS", "")
 SIP_PROXY = os.environ.get("VOICE_SIP_PROXY", "sip:sip.linphone.org;transport=tls")
+# Caller-ID display name shown on the phone (the SIP From header display name).
+SIP_DISPLAY_NAME = os.environ.get("VOICE_DISPLAY_NAME", "").strip()
 WHISPER_BIN = os.environ.get("WHISPER_BIN", "whisper-cli")
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL",
                                os.path.expanduser("~/.whisper-models/ggml-small.en.bin"))
@@ -176,7 +178,8 @@ class CallSession:
         self.ep.libStart()
 
         acfg = pj.AccountConfig()
-        acfg.idUri = SIP_ID
+        # add the caller-ID display name to the From header if configured
+        acfg.idUri = f'"{SIP_DISPLAY_NAME}" <{SIP_ID}>' if SIP_DISPLAY_NAME else SIP_ID
         acfg.regConfig.registrarUri = ""    # do NOT register (avoids self-call fork)
         acfg.sipConfig.authCreds.append(
             pj.AuthCredInfo("digest", "*", SIP_USER, 0, SIP_PASS))
