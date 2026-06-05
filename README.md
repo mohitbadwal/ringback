@@ -3,6 +3,7 @@
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS-lightgrey.svg)](#prerequisites)
 [![MCP](https://img.shields.io/badge/MCP-server-8A2BE2.svg)](https://modelcontextprotocol.io)
+[![Install with Claude Code](https://img.shields.io/badge/Install_with-Claude_Code-D97757.svg)](#let-claude-code-install-it-for-you)
 
 > **Your AI agent can call your phone — and actually talk to you.**
 
@@ -37,6 +38,33 @@ agent → call_end()
 ```
 
 The LLM calls `call_start` once, then `converse(...)` for each turn. Plain alerts are even simpler: one `alert_me(...)` call.
+
+---
+
+## Let Claude Code install it for you
+
+🤖 Easiest path: **copy the prompt below and paste it into [Claude Code](https://claude.com/claude-code)** — it'll clone, build, configure, and register everything, asking you only for what it needs (a free SIP account + your phone to answer a test call).
+
+```text
+Set up the ringback MCP server for me — it lets you (the agent) call my phone when you
+need a decision while I'm away. Repo: https://github.com/mohitbadwal/ringback (macOS only).
+
+Please:
+1. Check I'm on macOS with Homebrew; if not, stop and tell me.
+2. Clone https://github.com/mohitbadwal/ringback, cd in, and read its README + docs/SETUP_MACOS.md.
+3. Run ./setup.sh (installs the toolchain, compiles pjsua2 from source — ~20–30 min —
+   downloads a whisper model, and creates voice.env).
+4. I need a free Linphone SIP account (the phone line): walk me through signing up at
+   https://subscribe.linphone.org and installing the Linphone app on my phone, then put my
+   SIP id/username/password into voice.env (and set VOICE_DISPLAY_NAME to a caller-ID name).
+5. Register it: claude mcp add ringback-voice --scope user -- "$PWD/run_voice_mcp.sh"
+6. If a test call later fails with error -32000 or a segfault, run ./fix_macos_twolevel.sh.
+7. Tell me to start a fresh session, then call me to confirm two-way voice works.
+
+Ask me whenever you need input (SIP credentials, my phone to answer the test call, etc.).
+```
+
+Prefer to do it by hand? Quick start and the full walkthrough are below.
 
 ---
 
