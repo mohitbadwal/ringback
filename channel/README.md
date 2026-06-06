@@ -31,14 +31,25 @@ call-driver is faked by `inject.sh` so we can prove the *session-wakes-and-conti
 - `inject.sh` — stand-in for the call-driver: type what you'd have said on the phone.
 - `ringback.mcp.json` — registers the channel.
 
+## Two requirements the loop needs (verified the hard way)
+1. **Bypass posture (option A).** A woken away-session must be able to *act* on your
+   answer without a permission prompt nobody is there to approve. So launch with
+   `--dangerously-skip-permissions` (baked into `run_session.sh`). Without it, the
+   session still *wakes* but *stalls* on the first tool approval.
+2. **Block by ending the turn, not via a modal.** The channel can only reach the
+   session when it's **idle at the prompt**. If the agent asks via the interactive
+   `AskUserQuestion` menu (or any permission modal), it's parked *inside* that dialog —
+   not idle — and the channel can't deliver. So the agent must ask as **plain text and
+   end its turn**. The channel's `instructions` now steer it that way.
+
 ## Try it
-**Terminal A** — start a session with the channel attached (from the repo root):
+**Terminal A** — start a session with the channel attached, in bypass posture:
 ```bash
-claude --mcp-config channel/ringback.mcp.json --strict-mcp-config \
-       --dangerously-load-development-channels server:ringback
+./channel/run_session.sh
 ```
 Accept the folder-trust + "loading development channels" prompts. Then give Claude a
-task that makes it pause and wait on you (e.g. "ask me which option to pick, then wait").
+task that makes it pause and wait on you — phrased so it **asks as plain text and stops**
+(e.g. "ask me which option to pick *as a plain message and end your turn*, then wait").
 Let it go idle.
 
 **Terminal B** — answer "by phone" (no keystroke in Terminal A):

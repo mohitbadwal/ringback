@@ -74,7 +74,11 @@ function handleRpc(msg) {
         'Events arrive as <channel source="ringback" call_id="...">their answer</channel> — ' +
         'treat the content as a direct reply from the user and continue your task with it. ' +
         'To say something back to them on the call, use the `say` tool and pass the same ' +
-        'call_id from the event tag. Keep spoken replies short and plain.',
+        'call_id from the event tag. Keep spoken replies short and plain. ' +
+        'IMPORTANT: when you need the user and they may be away, ask your question as plain ' +
+        'text and END YOUR TURN — do NOT use interactive question menus or modal prompts. ' +
+        'The channel can only reach you once your turn has ended and you are idle; their ' +
+        'answer will then arrive here and wake you.',
     }});
     return;
   }
