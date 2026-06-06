@@ -8,7 +8,8 @@ the agent didn't think to call `ask_user_by_phone` itself.
 
 ALL of these gates must pass before it dials (so it's quiet in normal use):
   0. ringback is actually set up (SIP config present) — else no-op, harmless in a clone
-  1. user is AWAY      — macOS HID idle > RINGBACK_AWAY_IDLE_SEC (default 300s)
+  1. user is AWAY      — input idle > RINGBACK_AWAY_IDLE_SEC (default 300s); idle is
+                         read per-OS by platform_compat (mac/Linux/Windows)
   2. no active call    — channel/.call_active lockfile absent/stale
   3. it's a question   — the agent's last message to the user ends with "?"
   4. not a repeat      — we haven't already handled this exact turn
@@ -27,6 +28,12 @@ import subprocess
 import sys
 import time
 
+# platform_compat lives in the repo root (one level up from channel/).
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+from platform_compat import detached_popen_kwargs, hid_idle_seconds  # noqa: E402
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 LOCK = os.path.join(HERE, ".call_active")
 STATE = os.path.join(HERE, ".stop_hook_state.json")
@@ -44,17 +51,8 @@ def log(m):
         pass
 
 
-def hid_idle_seconds():
-    """macOS: seconds since the last keyboard/mouse input. Large => user is away."""
-    try:
-        out = subprocess.run(["ioreg", "-c", "IOHIDSystem"],
-                             capture_output=True, text=True, timeout=5).stdout
-        for line in out.splitlines():
-            if "HIDIdleTime" in line:
-                return int(line.split("=")[-1].strip()) / 1e9
-    except Exception:
-        pass
-    return 0.0
+# hid_idle_seconds() now comes from platform_compat (mac=ioreg, Linux=xprintidle/D-Bus,
+# Windows=GetLastInputInfo); the macOS path is the same ioreg logic as before.
 
 
 def lock_active():
@@ -165,7 +163,7 @@ def main():
                           "--question", text, "--call-id", "phone",
                           "--say-wait", os.environ.get("RINGBACK_SAY_WAIT", "45")],
                          cwd=os.path.join(HERE, ".."), env=env,
-                         stdout=out, stderr=out, start_new_session=True)
+                         stdout=out, stderr=out, **detached_popen_kwargs())
         log(f"PLACED call. idle={idle:.0f}s question={text[:160]!r}")
     except Exception as e:
         log(f"ERROR placing call: {e}")

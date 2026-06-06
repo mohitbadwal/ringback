@@ -21,6 +21,12 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 sys.path.insert(0, ROOT)
 from mix_echo import SR, _read  # noqa: E402
+# aec.py imports livekit LAZILY (inside AecProcessor.__init__), so a plain `import aec`
+# succeeds even without it — check the dep up front and skip cleanly. AEC is an optional
+# fallback (modern phones do their own echo cancellation), not required for the build.
+if importlib.util.find_spec("livekit") is None:
+    print("SKIP: AEC core unavailable (livekit not installed); optional fallback.")
+    sys.exit(0)
 import aec  # noqa: E402
 
 pj = types.ModuleType("pjsua2")

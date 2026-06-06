@@ -6,6 +6,8 @@
 # local SIP identity/password — use voice.env.example instead
 voice.env
 alert.env
+# plain KEY=val cred files generated for `docker --env-file` (see docs/SETUP_DOCKER.md)
+*.docker.env
 
 # --- python ---
 __pycache__/
@@ -16,6 +18,8 @@ venv/
 # --- local runtime data ---
 ntfy/*.db
 *.wav
+# PRIVATE: harvested real-call voice recordings (never commit)
+tests/fixtures/real/
 channel/outbound.jsonl
 channel/ringback_channel.log
 channel/call_driver.log

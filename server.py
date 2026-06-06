@@ -25,13 +25,21 @@ Run:  uv run server.py        (deps resolved from the PEP-723 block above)
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
+import sys
 import threading
 import time
 from collections import deque
 
 import httpx
 from mcp.server.fastmcp import FastMCP
+
+# platform_compat lives next to this file (OS seams: detached child spawn, etc.).
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+from platform_compat import detached_popen_kwargs  # noqa: E402
 
 mcp = FastMCP("ringback-alert")
 
@@ -50,7 +58,8 @@ PUSHOVER_USER = os.environ.get("PUSHOVER_USER", "").strip()
 # that rings the phone full-screen via CallKit and pierces silent/Focus like a
 # normal call. Credentials live in the baresip config dir's `accounts` file,
 # NOT in this server's env, so no SIP password passes through the MCP client.
-SIP_BARESIP_BIN = os.environ.get("SIP_BARESIP_BIN", "/opt/homebrew/bin/baresip")
+SIP_BARESIP_BIN = (os.environ.get("SIP_BARESIP_BIN", "").strip()
+                   or shutil.which("baresip") or "/opt/homebrew/bin/baresip")
 SIP_CONFIG_DIR = os.environ.get("SIP_CONFIG_DIR", "").strip()   # baresip dir holding the account
 SIP_CALLEE = os.environ.get("SIP_CALLEE", "").strip()           # e.g. sip:you@sip.linphone.org
 SIP_RING_SECONDS = os.environ.get("SIP_RING_SECONDS", "30").strip()  # auto-hangup after N sec
@@ -148,7 +157,7 @@ def _send_call(message: str, title: str, severity: str) -> str:
             stdin=subprocess.DEVNULL,   # don't fight the MCP's own stdio transport
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            start_new_session=True,     # survive past this process; don't get reaped
+            **detached_popen_kwargs(),  # survive past this process; don't get reaped
         )
     except FileNotFoundError:
         return f"call: ERROR baresip not found at {SIP_BARESIP_BIN}"

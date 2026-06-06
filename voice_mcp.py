@@ -5,9 +5,9 @@ The calling Claude session IS the conversational brain: it calls call_start to
 ring the user, then alternates listen()/speak() each turn, and call_end() when
 done. No LLM API key — the model already running this tool does the thinking.
 
-Requires pjsua2 (built from source) + whisper.cpp + macOS `say` + ffmpeg.
-Launched via run_voice_mcp.sh, which sets PYTHONPATH/DYLD_LIBRARY_PATH so
-`import voice_agent` (pjsua2) works.
+Requires pjsua2 (built from source) + whisper.cpp + Piper/say (TTS) + ffmpeg.
+Launched via run_voice_mcp.sh (macOS) or run_voice_mcp.py (cross-platform), which set
+PYTHONPATH + the OS dynamic-linker path so `import voice_agent` (pjsua2) resolves.
 """
 import os
 import time

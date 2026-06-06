@@ -34,6 +34,12 @@ def run(mode):
 
 
 def main():
+    # This is a de-risk record specific to the macOS pjsua2 build (the Python AudioMediaPort
+    # AEC NO-GO). It is not a cross-platform gate — the engine never uses frame ports — so it
+    # only runs on macOS; elsewhere it skips cleanly.
+    if sys.platform != "darwin":
+        print("SKIP: frame-port AEC de-risk is a macOS-build-specific probe; not run on this OS.")
+        return 0
     if not os.path.exists(os.path.join(HERE, "fixtures", "long_sentence.wav")):
         print("fixtures missing — run: python3 tests/gen_fixtures.py")
         return 2

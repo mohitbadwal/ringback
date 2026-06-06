@@ -1,7 +1,7 @@
 # ringback
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-macOS-lightgrey.svg)](#prerequisites)
+[![Platform](https://img.shields.io/badge/platform-macOS_|_Linux_|_Windows-lightgrey.svg)](#prerequisites)
 [![MCP](https://img.shields.io/badge/MCP-server-8A2BE2.svg)](https://modelcontextprotocol.io)
 [![Install with Claude Code](https://img.shields.io/badge/Install_with-Claude_Code-D97757.svg)](#let-claude-code-install-it-for-you)
 
@@ -12,12 +12,12 @@
 **Highlights**
 - 📞 **Two-way voice calls** — the agent rings your phone, you talk, it transcribes you and replies in speech. **Barge-in**: talk over it and it stops.
 - 🔔 **Tiered alerts** — a loud push (ntfy / Pushover) or a real SIP ring + chat message, fired only when *the LLM* judges it urgent.
-- 🆓 **Free & self-hosted** — pjsua2 + whisper.cpp + macOS `say` + a free Linphone SIP account. No Twilio, no per-minute fees.
+- 🆓 **Free & self-hosted** — pjsua2 + whisper.cpp + Piper neural TTS + a free Linphone SIP account. No Twilio, no per-minute fees.
 - 🧠 **No conversation API key** — the calling model is the brain; these tools are just its ears and mouth.
 
 It ships two MCP servers, `ringback-alert` and `ringback-voice`:
 
-> **Platform:** macOS only. The voice feature uses Apple's `say` (TTS) and CoreAudio via pjsua2.
+> **Platform:** macOS, **Linux**, and **Windows** (via WSL2 or Docker). TTS is [Piper](https://github.com/rhasspy/piper) by default (same voice everywhere), falling back to the OS-native voice (`say` on macOS). The engine is **headless** — it never opens a local mic/speaker (all audio is WAV ↔ SIP/RTP), so no sound card is required. Setup guides: [macOS](docs/SETUP_MACOS.md) · [Linux](docs/SETUP_LINUX.md) · [Windows](docs/SETUP_WINDOWS.md) · [Docker](docs/SETUP_DOCKER.md).
 
 | Server | Tools | What it does |
 |---|---|---|
@@ -47,18 +47,25 @@ The LLM calls `call_start` once, then `converse(...)` for each turn. Plain alert
 
 ```text
 Set up the ringback MCP server for me — it lets you (the agent) call my phone when you
-need a decision while I'm away. Repo: https://github.com/mohitbadwal/ringback (macOS only).
+need a decision while I'm away. Repo: https://github.com/mohitbadwal/ringback
+(runs on macOS, Linux, or Windows via WSL2/Docker).
 
 Please:
-1. Check I'm on macOS with Homebrew; if not, stop and tell me.
-2. Clone https://github.com/mohitbadwal/ringback, cd in, and read its README + docs/SETUP_MACOS.md.
-3. Run ./setup.sh (installs the toolchain, compiles pjsua2 from source — ~20–30 min —
-   downloads a whisper model, and creates voice.env).
+1. Detect my OS and pick the path:
+   - macOS                 → ./setup.sh (Homebrew); read docs/SETUP_MACOS.md
+   - Linux or Windows-WSL2 → ./setup-linux.sh; read docs/SETUP_LINUX.md
+   - Windows without WSL2   → use Docker; read docs/SETUP_DOCKER.md
+2. Clone https://github.com/mohitbadwal/ringback, cd in, and read the README + the doc above.
+3. Run the setup for my OS (compiles pjsua2 from source — ~20–30 min — installs whisper +
+   Piper TTS, downloads models, and creates voice.env).
 4. I need a free Linphone SIP account (the phone line): walk me through signing up at
    https://subscribe.linphone.org and installing the Linphone app on my phone, then put my
    SIP id/username/password into voice.env (and set VOICE_DISPLAY_NAME to a caller-ID name).
-5. Register it: claude mcp add ringback-voice --scope user -- "$PWD/run_voice_mcp.sh"
-6. If a test call later fails with error -32000 or a segfault, run ./fix_macos_twolevel.sh.
+5. Register it (per OS):
+   - macOS:      claude mcp add ringback-voice --scope user -- "$PWD/run_voice_mcp.sh"
+   - Linux/WSL2: claude mcp add ringback-voice --scope user -- python3 "$PWD/run_voice_mcp.py"
+   - Docker:     see docs/SETUP_DOCKER.md (build image, convert creds to voice.docker.env, then register a `docker run -i` command)
+6. macOS only: if a test call fails with error -32000 or a segfault, run ./fix_macos_twolevel.sh.
 7. Tell me to start a fresh session, then call me to confirm two-way voice works.
 
 Ask me whenever you need input (SIP credentials, my phone to answer the test call, etc.).
@@ -83,10 +90,10 @@ Full walkthrough + env-var reference: **[Set up ringback-voice](#set-up-ringback
 
 ## Honest caveats (read first)
 
-- **macOS only.** `say` + CoreAudio. No Linux/Windows path today.
-- **Not ChatGPT-realtime.** The voice loop is record → whisper STT → LLM → `say` TTS, so expect **~1–2 s per turn**. It's a reliable walkie-talkie with barge-in, not a streaming realtime voice.
+- **Cross-platform.** macOS (native), Linux (native), Windows (via WSL2 or Docker). The engine is headless — no sound card needed. Native Windows (MSVC) is intentionally not supported; WSL2/Docker is the Windows path.
+- **Not ChatGPT-realtime.** The voice loop is record → whisper STT → LLM → Piper/say TTS, so expect **~1–2 s per turn**. It's a reliable walkie-talkie with barge-in, not a streaming realtime voice.
 - **The voice feature depends on GPL software** (pjproject/pjsua2). This repo is Apache-2.0, but redistributing a bundle that links pjsua2 carries GPL obligations — see [`NOTICE`](NOTICE). The ringback-alert server is unaffected.
-- **Your Mac must be awake and online**, and for a voice call a Claude session must be live (it's the brain) for the duration.
+- **Your machine must be awake and online**, and for a voice call a Claude session must be live (it's the brain) for the duration.
 - **Barge-in assumes low acoustic echo** (handset or headset). On speakerphone, the TTS can echo into the mic and false-trigger "interruption." There's no echo cancellation in this path.
 - **iOS push reality:** a self-hosted/free push can't truly pierce Focus/Silent on iPhone except via Pushover's Critical Alerts (paid) — see ringback-alert notes below.
 
@@ -99,7 +106,7 @@ Full walkthrough + env-var reference: **[Set up ringback-voice](#set-up-ringback
                                    │  call_start / converse / listen / speak
                                    ▼
                  pjsua2 (SIP+SRTP, built from source)  ──▶  Linphone SIP server
-                   │  say → ffmpeg → WAV  (speak)              │ APNs VoIP push
+                   │  Piper/say → ffmpeg → WAV  (speak)        │ APNs VoIP push
                    │  record → whisper.cpp (listen)            ▼
                    └───────────────────────────────────▶  your iPhone rings
 ```
@@ -110,8 +117,12 @@ ringback-alert is simpler: it shells out to `ntfy`/Pushover HTTP and/or `baresip
 
 ## Prerequisites
 
-- macOS (Apple Silicon or Intel) with [Homebrew](https://brew.sh)
-- A free **Linphone** SIP account (`sip.linphone.org`) and the **Linphone iOS app** (for the ring/voice features)
+- One of:
+  - **macOS** (Apple Silicon or Intel) with [Homebrew](https://brew.sh) — run `./setup.sh`
+  - **Linux** (Debian/Ubuntu/Fedora) — run `./setup-linux.sh` (see [docs/SETUP_LINUX.md](docs/SETUP_LINUX.md))
+  - **Windows** — WSL2 (run `./setup-linux.sh` inside it) or Docker Desktop (see [docs/SETUP_WINDOWS.md](docs/SETUP_WINDOWS.md))
+  - **Any OS with Docker** — `docker build -t ringback .` (see [docs/SETUP_DOCKER.md](docs/SETUP_DOCKER.md))
+- A free **Linphone** SIP account (`sip.linphone.org`) and the **Linphone iOS/Android app** (for the ring/voice features)
 - Python 3.10+ (the pjsua2 bindings are built against whichever `python3` you point at)
 
 ---
@@ -123,7 +134,9 @@ ringback-alert is simpler: it shells out to `ntfy`/Pushover HTTP and/or `baresip
 git clone https://github.com/mohitbadwal/ringback && cd ringback
 ./setup.sh
 ```
-`setup.sh` installs the toolchain, **compiles pjsua2 from source** (~20–30 min — no Homebrew formula exists for the bindings), relinks the pjproject dylibs to a two-level OpenSSL namespace (the macOS fix that makes SIP/SRTP work), downloads the whisper model, installs deps, **and creates `voice.env` for you**. Safe to re-run. (Override `PYTHON_BIN` / `PJPROJECT_DIR` / `WHISPER_MODEL_NAME` if your layout differs.)
+`setup.sh` installs the toolchain, **compiles pjsua2 from source** (~20–30 min — no Homebrew formula exists for the bindings), relinks the pjproject dylibs to a two-level OpenSSL namespace (the macOS fix that makes SIP/SRTP work), downloads the whisper model, installs Piper + a voice, installs deps, **and creates `voice.env` for you**. Safe to re-run. (Override `PYTHON_BIN` / `PJPROJECT_DIR` / `WHISPER_MODEL_NAME` if your layout differs.)
+
+> **On Linux?** Use [`./setup-linux.sh`](docs/SETUP_LINUX.md) instead — it does the same build with apt/dnf and needs **no** OpenSSL relink. **On Windows?** Use WSL2 ([docs/SETUP_WINDOWS.md](docs/SETUP_WINDOWS.md)) or [Docker](docs/SETUP_DOCKER.md). Register the server with the cross-platform launcher `python3 run_voice_mcp.py` (the `.sh` is macOS-only).
 
 > **Hit a snag on macOS?** [`docs/SETUP_MACOS.md`](docs/SETUP_MACOS.md) is a field-tested root-cause + troubleshooting guide (build target, the OpenSSL flat-namespace fix, whisper model, symptom→fix table).
 
@@ -148,13 +161,23 @@ Full variable reference:
 | `VOICE_SIP_CALLEE` | — | = `VOICE_SIP_ID` | Address to call (normally yourself) |
 | `VOICE_SIP_PROXY` | — | `sip:sip.linphone.org;transport=tls` | SIP registrar/proxy |
 | `WHISPER_MODEL` | — | `~/.whisper-models/ggml-small.en.bin` | STT model: `base.en` (fast) · `small.en` (default) · `medium.en` (accurate) |
+| `VOICE_TTS` | — | `auto` | TTS engine: `auto` (Piper if installed, else OS voice) · `piper` · `say` · `espeak` · `sapi` |
+| `VOICE_PIPER_MODEL` | — | `~/.piper-voices/en_US-lessac-medium.onnx` | Piper voice (`.onnx`; needs the matching `.onnx.json` beside it) |
+| `VOICE_TTS_CMD` | — | — | Custom TTS command template with `{text}`/`{out}` (overrides `VOICE_TTS`) |
+| `VOICE_NULL_AUDIO` | — | `auto` | Force pjsua2 null audio device (`auto` = on except macOS; `1`/`0` to force) |
+| `RINGBACK_PRESENCE` | — | — | Override watchdog idle/presence: `present` or `absent` (for Wayland/headless) |
 | `PJPROJECT_DIR` | — | `~/build/pjproject-2.17` | pjsua2 build dir (auto-detected) |
 | `PYTHON_BIN` | — | `$(command -v python3)` | Python that has pjsua2 (auto-detected) |
-| `OPENSSL_PREFIX` | — | `$(brew --prefix openssl@3)` | OpenSSL libs (auto-detected) |
+| `OPENSSL_PREFIX` | — | `$(brew --prefix openssl@3)` | OpenSSL libs (macOS; auto-detected) |
 
 **4. Register + test:**
 ```bash
+# macOS:
 claude mcp add ringback-voice --scope user -- "$PWD/run_voice_mcp.sh"
+# Linux / Windows-WSL2 (cross-platform launcher):
+claude mcp add ringback-voice --scope user -- python3 "$PWD/run_voice_mcp.py"
+# Any OS via Docker (convert creds to voice.docker.env first — see docs/SETUP_DOCKER.md):
+claude mcp add ringback-voice --scope user -- docker run -i --rm --network host --env-file voice.docker.env ringback
 ```
 Then in a **fresh** Claude session say: *"Use ringback-voice to call me and say hello."* Your phone should ring.
 
@@ -215,7 +238,7 @@ A built-in rate-limit guard (default 5/60s, per-process) stops a misfiring calle
 
 ## Bundled skill: watchdog
 
-[`skills/watchdog/`](skills/watchdog/SKILL.md) is a ready-to-use Claude skill built on these servers. It watches a condition you give it (a CI run, a deploy, a pod, a file) and **escalates only when you're actually away** from the laptop — chat status → chat warning → `ringback-alert` push → `ringback-voice` call — judged by macOS HID idle time. It never interrupts you while you're typing, and de-escalates the moment you touch the keyboard.
+[`skills/watchdog/`](skills/watchdog/SKILL.md) is a ready-to-use Claude skill built on these servers. It watches a condition you give it (a CI run, a deploy, a pod, a file) and **escalates only when you're actually away** from the laptop — chat status → chat warning → `ringback-alert` push → `ringback-voice` call — judged by input-idle time (macOS, Linux, or Windows; see `platform_compat.hid_idle_seconds`). It never interrupts you while you're typing, and de-escalates the moment you touch the keyboard.
 
 ```bash
 cp -r skills/watchdog ~/.claude/skills/watchdog   # install for Claude Code

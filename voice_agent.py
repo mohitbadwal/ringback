@@ -14,6 +14,7 @@ import math
 import os
 import struct
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.error
@@ -21,6 +22,13 @@ import urllib.request
 import wave
 
 import pjsua2 as pj
+
+# platform_compat lives next to this file; make it importable no matter how we're
+# loaded (the test harness loads voice_agent.py by path without adding its dir to path).
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+from platform_compat import IS_MAC, detached_popen_kwargs, synthesize_to_wav  # noqa: E402
 
 # ---- config (all via env; see voice.env.example) ------------------------------
 # Your SIP identity/credentials come from the environment (the launcher sources
@@ -114,17 +122,10 @@ def _eff_threshold(base: float, noise_floor: float, factor: float = NOISE_FACTOR
 
 
 def _tts_to_wav(text: str) -> str:
-    """macOS `say` -> 16 kHz mono 16-bit WAV (pjsua2 resamples as needed)."""
-    aiff = tempfile.mktemp(suffix=".aiff")
+    """Render text -> 16 kHz mono 16-bit WAV (pjsua2 resamples as needed). Engine is
+    Piper by default, falling back to the OS-native voice; see platform_compat."""
     wav = tempfile.mktemp(suffix=".wav")
-    subprocess.run(["say", "-o", aiff, text], check=True)
-    subprocess.run([FFMPEG, "-y", "-loglevel", "error", "-i", aiff,
-                    "-ar", "16000", "-ac", "1", "-acodec", "pcm_s16le", wav], check=True)
-    try:
-        os.remove(aiff)
-    except OSError:
-        pass
-    return wav
+    return synthesize_to_wav(text, wav)
 
 
 def _wav_duration(path: str) -> float:
@@ -244,7 +245,8 @@ def _wsrv_spawn():
             _wsrv_proc = subprocess.Popen(
                 [WHISPER_SERVER_BIN, "-m", WHISPER_SERVER_MODEL,
                  "--host", WHISPER_SERVER_HOST, "--port", str(WHISPER_SERVER_PORT)],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                **detached_popen_kwargs())
             _wsrv_last_use = time.time()
         except FileNotFoundError:
             _wsrv_proc = None
@@ -483,6 +485,19 @@ class CallSession:
         tls.tlsConfig.method = pj.PJSIP_TLSV1_2_METHOD
         self.ep.transportCreate(pj.PJSIP_TRANSPORT_TLS, tls)
         self.ep.libStart()
+        # We never use the local sound card — all media is file<->call(RTP). On headless
+        # Linux / containers we force a NULL audio device so pjsua2 never needs a real one
+        # (this is what lets the engine run fully headless). On macOS we KEEP the existing,
+        # known-good behavior by default so nothing regresses; set VOICE_NULL_AUDIO=1 to
+        # force null there too, or =0 to disable everywhere.
+        _null = os.environ.get("VOICE_NULL_AUDIO", "auto").strip().lower()
+        if _null in ("1", "true", "yes") or (_null == "auto" and not IS_MAC):
+            try:
+                self.ep.audDevManager().setNullDev()
+            except Exception as e:
+                # A headless-audio misconfig must not hide behind a green init — surface it
+                # on stderr (stdout is the MCP transport). Non-fatal: pjsua may still cope.
+                print(f"[ringback] setNullDev() failed: {e}", file=sys.stderr)
 
         acfg = pj.AccountConfig()
         # add the caller-ID display name to the From header if configured
