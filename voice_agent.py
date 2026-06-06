@@ -44,6 +44,10 @@ BARGE_RMS_BASE = float(os.environ.get("VOICE_BARGE_RMS", "550"))
 LISTEN_RMS_BASE = float(os.environ.get("VOICE_LISTEN_RMS", "320"))
 NOISE_FACTOR = float(os.environ.get("VOICE_NOISE_FACTOR", "2.5"))
 RMS_CAP = float(os.environ.get("VOICE_RMS_CAP", "3000"))  # never raise threshold above this
+# Listen (capturing the user) uses a GENTLER factor than barge: barge must avoid
+# false-triggering on noise/echo (high bar), but listen must still hear the user in a
+# noisy room (lower bar) — whisper discards any non-speech that slips through.
+LISTEN_NOISE_FACTOR = float(os.environ.get("VOICE_LISTEN_NOISE_FACTOR", "1.5"))
 # Debounce: consecutive over-threshold polls required to count as real speech (not a
 # transient). Higher = more noise-robust, slightly less instant barge-in.
 BARGE_DEBOUNCE = int(os.environ.get("VOICE_BARGE_DEBOUNCE", "5"))    # ~0.40s at 0.08s/poll
@@ -59,9 +63,13 @@ EARLY_BARGE_SEC = float(os.environ.get("VOICE_EARLY_BARGE_SEC", "0.6"))
 POST_SPEAK_DRAIN = float(os.environ.get("VOICE_POST_SPEAK_DRAIN", "0.35"))  # let echo tail clear
 
 
-def _eff_threshold(base: float, noise_floor: float) -> float:
-    """Speech threshold = base, raised to clear measured ambient noise, then capped."""
-    return min(max(base, noise_floor * NOISE_FACTOR), RMS_CAP)
+def _eff_threshold(base: float, noise_floor: float, factor: float = NOISE_FACTOR) -> float:
+    """Speech threshold = base, raised to clear measured ambient noise, then capped.
+
+    `factor` is how far above the noise floor speech must be — high for barge-in
+    (don't false-trigger), gentler for listen (still hear the user in a noisy room).
+    """
+    return min(max(base, noise_floor * factor), RMS_CAP)
 
 
 def _tts_to_wav(text: str) -> str:
@@ -310,7 +318,7 @@ class CallSession:
         silence_since = None
         over = 0                  # consecutive over-threshold polls (debounce)
         grace = 0.4               # ignore residual beep echo at the very start
-        thresh = _eff_threshold(rms_thresh, self.noise_floor)   # clear ambient noise
+        thresh = _eff_threshold(rms_thresh, self.noise_floor, LISTEN_NOISE_FACTOR)  # gentler: still hear the user
         while time.time() - start < max_sec:
             time.sleep(0.1)
             if time.time() - start < grace:
@@ -454,13 +462,14 @@ class CallSession:
             silence_since = None
             o2 = 0
             t0 = time.time()
+            cap_thresh = _eff_threshold(barge_rms, self.noise_floor, LISTEN_NOISE_FACTOR)  # capturing the user: be sensitive
             while time.time() - t0 < max_wait:
                 time.sleep(0.08)
                 if self.disconnected:
                     break
-                if _tail_rms(cap_wav) > barge_thresh:
+                if _tail_rms(cap_wav) > cap_thresh:
                     o2 += 1
-                    if o2 >= BARGE_DEBOUNCE:
+                    if o2 >= LISTEN_DEBOUNCE:
                         heard = True
                     silence_since = None
                 else:
