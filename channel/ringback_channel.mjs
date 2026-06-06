@@ -26,13 +26,17 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { spawn } from 'node:child_process';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = path.join(HERE, '..');
 const PORT = parseInt(process.env.RINGBACK_CHANNEL_PORT || '8790', 10);
 const HOST = '127.0.0.1'; // loopback ONLY — never bind a public interface
 const TOKEN = (process.env.RINGBACK_CHANNEL_TOKEN || '').trim(); // optional shared secret
 const OUTBOUND = path.join(HERE, 'outbound.jsonl'); // what Claude `say`s back (the "call")
 const DEBUG = path.join(HERE, 'ringback_channel.log');
+const CALL_DRIVER_LOG = path.join(HERE, 'call_driver.log');
+let activeCall = null; // the spawned call-driver child, while a call is in flight
 
 const log = (m) => { try { fs.appendFileSync(DEBUG, `[${new Date().toISOString()}] ${m}\n`); } catch {} };
 
@@ -70,21 +74,33 @@ function handleRpc(msg) {
       capabilities: { experimental: { 'claude/channel': {} }, tools: { listChanged: false } },
       serverInfo: { name: 'ringback', version: '0.1.0' },
       instructions:
-        'The "ringback" channel is how the user answers you by phone while away. ' +
-        'Events arrive as <channel source="ringback" call_id="...">their answer</channel> — ' +
-        'treat the content as a direct reply from the user and continue your task with it. ' +
-        'To say something back to them on the call, use the `say` tool and pass the same ' +
-        'call_id from the event tag. Keep spoken replies short and plain. ' +
-        'IMPORTANT: when you need the user and they may be away, ask your question as plain ' +
-        'text and END YOUR TURN — do NOT use interactive question menus or modal prompts. ' +
-        'The channel can only reach you once your turn has ended and you are idle; their ' +
-        'answer will then arrive here and wake you.',
+        'The "ringback" channel lets you reach the user by PHONE when they are away from ' +
+        'the keyboard. When you need a decision or answer from an away user, call the ' +
+        '`ask_user_by_phone` tool with your question — it calls them and asks it out loud — ' +
+        'then END YOUR TURN. Do NOT use interactive question menus or modal prompts, and do ' +
+        'NOT just wait; the channel can only reach you once your turn has ended and you are ' +
+        'idle. Their spoken answer then arrives as <channel source="ringback" call_id="...">' +
+        'their answer</channel> — treat it as a direct reply and continue. While that call is ' +
+        'still up you can speak back to them with the `say` tool (pass the same call_id from ' +
+        'the event tag) to confirm, report progress, or ask a follow-up. Keep spoken lines ' +
+        'short and plain.',
     }});
     return;
   }
   if (method === 'notifications/initialized') { return; }
   if (method === 'tools/list') {
     send({ jsonrpc: '2.0', id, result: { tools: [{
+      name: 'ask_user_by_phone',
+      description:
+        'Phone the user and ask them a question out loud, when they are away from the ' +
+        'keyboard and you need their decision or input to continue. This places a real call ' +
+        'and asks your question; you should then END YOUR TURN. The user\'s spoken answer ' +
+        'arrives back through this channel and wakes you to continue. Use this instead of ' +
+        'an interactive menu/modal when the user may not be at the screen.',
+      inputSchema: { type: 'object', properties: {
+        question: { type: 'string', description: 'The question to ask the user out loud on the call. One clear sentence.' },
+      }, required: ['question'] },
+    }, {
       name: 'say',
       description:
         'Speak a short message back to the user on the active ringback phone call. ' +
@@ -98,6 +114,39 @@ function handleRpc(msg) {
     return;
   }
   if (method === 'tools/call') {
+    if (params?.name === 'ask_user_by_phone') {
+      const args = params.arguments || {};
+      const question = (args.question || '').toString().trim();
+      if (!question) {
+        send({ jsonrpc: '2.0', id, error: { code: -32602, message: 'question is required' } });
+        return;
+      }
+      if (activeCall && activeCall.exitCode === null) {
+        send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text',
+          text: 'A phone call is already in progress — not starting another. Wait for the answer.' }] } });
+        return;
+      }
+      try {
+        const out = fs.openSync(CALL_DRIVER_LOG, 'a');
+        // detached: the call outlives this tool call; the answer returns async via /inject.
+        const child = spawn('bash',
+          [path.join(HERE, 'run_call_driver.sh'),
+           '--question', question, '--call-id', 'phone', '--say-wait', '45'],
+          { cwd: REPO_ROOT, env: { ...process.env, RINGBACK_CHANNEL_PORT: String(PORT) },
+            detached: true, stdio: ['ignore', out, out] });
+        child.on('error', (e) => log(`call-driver spawn error: ${e.message}`));
+        child.unref();
+        activeCall = child;
+        log(`ask_user_by_phone: spawned call-driver pid=${child.pid} q=${JSON.stringify(question).slice(0, 200)}`);
+        send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text:
+          'Calling the user now and asking your question by phone. END YOUR TURN — do not wait ' +
+          'or do anything else. Their spoken answer will arrive through this channel and wake ' +
+          'you; then use the `say` tool to speak back on the call.' }] } });
+      } catch (e) {
+        send({ jsonrpc: '2.0', id, error: { code: -32000, message: 'failed to start call: ' + e.message } });
+      }
+      return;
+    }
     if (params?.name === 'say') {
       const args = params.arguments || {};
       const rec = { ts: new Date().toISOString(), call_id: args.call_id || null, text: args.text || '' };

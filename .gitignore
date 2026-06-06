@@ -18,6 +18,7 @@ ntfy/*.db
 *.wav
 channel/outbound.jsonl
 channel/ringback_channel.log
+channel/call_driver.log
 
 # --- large downloaded artifacts (fetched by setup.sh) ---
 *.bin
