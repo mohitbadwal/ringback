@@ -95,7 +95,8 @@ def last_assistant_text(transcript_path):
 
 
 def looks_like_question(t):
-    return t.strip().endswith("?")
+    # a question mark anywhere — robust to trailing instructions like "say yes or no."
+    return "?" in t.strip()
 
 
 def already_handled(uuid):
@@ -161,7 +162,8 @@ def main():
         env["RINGBACK_CHANNEL_PORT"] = os.environ.get("RINGBACK_CHANNEL_PORT", "8790")
         out = open(os.path.join(HERE, "call_driver.log"), "a")
         subprocess.Popen(["bash", os.path.join(HERE, "run_call_driver.sh"),
-                          "--question", text, "--call-id", "phone", "--say-wait", "45"],
+                          "--question", text, "--call-id", "phone",
+                          "--say-wait", os.environ.get("RINGBACK_SAY_WAIT", "45")],
                          cwd=os.path.join(HERE, ".."), env=env,
                          stdout=out, stderr=out, start_new_session=True)
         log(f"PLACED call. idle={idle:.0f}s question={text[:160]!r}")
