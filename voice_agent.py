@@ -46,6 +46,12 @@ BARGE_RMS_BASE = float(os.environ.get("VOICE_BARGE_RMS", "550"))
 LISTEN_RMS_BASE = float(os.environ.get("VOICE_LISTEN_RMS", "320"))
 NOISE_FACTOR = float(os.environ.get("VOICE_NOISE_FACTOR", "2.5"))
 RMS_CAP = float(os.environ.get("VOICE_RMS_CAP", "3000"))  # never raise threshold above this
+# Barge-in threshold floor. The barge detector must key off the near-end level DURING our
+# TX (when the user is silent), NOT the pre-call ambient noise floor: a real harvested call
+# measured ambient ~2441 but the during-TX floor ~1-800 and the user's barge ~2000-3972 —
+# so a noise-floor-derived threshold (capped at 3000) MISSED the user. We measure the live
+# during-TX floor each utterance and clamp it to at least this, well under a real barge.
+BARGE_RMS_MIN = float(os.environ.get("VOICE_BARGE_RMS_MIN", "1300"))
 # Listen (capturing the user) uses a GENTLER factor than barge: barge must avoid
 # false-triggering on noise/echo (high bar), but listen must still hear the user in a
 # noisy room (lower bar) — whisper discards any non-speech that slips through.
@@ -55,17 +61,18 @@ LISTEN_NOISE_FACTOR = float(os.environ.get("VOICE_LISTEN_NOISE_FACTOR", "1.5"))
 BARGE_DEBOUNCE = int(os.environ.get("VOICE_BARGE_DEBOUNCE", "5"))    # ~0.40s at 0.08s/poll
 LISTEN_DEBOUNCE = int(os.environ.get("VOICE_LISTEN_DEBOUNCE", "3"))  # ~0.30s at 0.10s/poll
 
-# Speakerphone echo: the user's speaker plays our TTS back into their mic, which can
-# look like the user interrupting. We auto-detect it — a "barge" within the first
-# EARLY_BARGE_SEC of our own speech is almost always our echo, not the user — and switch
-# the call to half-duplex (speak fully, then listen) so echo can't cut us off.
-# VOICE_HALF_DUPLEX=1 forces it on from the first word (e.g. if you know it's on speaker).
-HALF_DUPLEX = os.environ.get("VOICE_HALF_DUPLEX", "1").strip().lower() in ("1", "true", "yes")
-# A "barge" within the first EARLY_BARGE_SEC of our own speech = our echo, not the user
-# (a real person doesn't interrupt before hearing a couple seconds). 2.0s, because on a
-# loudspeaker the echo barge only debounces past threshold at ~0.7-0.9s — a 0.6s window
-# missed it and cut us off. Wider window catches the echo early and flips to half-duplex.
-EARLY_BARGE_SEC = float(os.environ.get("VOICE_EARLY_BARGE_SEC", "2.0"))
+# Barge-in is ON by default. A harvested speakerphone call (user 100% on speaker) showed
+# essentially NO echo in the near-end — modern phones run their own acoustic echo
+# cancellation, so our TTS does not loop back. Barge-in is therefore safe without AEC.
+# The early-barge guard below stays as a FALLBACK: if a device ever does echo our voice
+# back, a sustained "barge" in the first EARLY_BARGE_SEC flips that call to half-duplex.
+# Set VOICE_HALF_DUPLEX=1 to force half-duplex (a known echoey device / no phone AEC).
+HALF_DUPLEX = os.environ.get("VOICE_HALF_DUPLEX", "0").strip().lower() in ("1", "true", "yes")
+# A sustained "barge" within the first EARLY_BARGE_SEC of our speech is treated as echo
+# (a real person rarely cuts in this early) and flips the call to half-duplex as a safety.
+# Shorter now (0.8s): with phone-side AEC there's no echo to catch, and a real early barge
+# should register — so only the very start is guarded.
+EARLY_BARGE_SEC = float(os.environ.get("VOICE_EARLY_BARGE_SEC", "0.8"))
 POST_SPEAK_DRAIN = float(os.environ.get("VOICE_POST_SPEAK_DRAIN", "0.35"))  # let echo tail clear
 # Turn-taking — TWO phases, because one tight timeout dropped real speech:
 #   START_TIMEOUT: how long to wait for the user's FIRST word before giving up. Must be
@@ -325,6 +332,31 @@ def _capture_turn(snapshot_fn, is_disconnected, max_sec: float = 15.0,
     return text
 
 
+class _BargeState:
+    """Decide if/when the user barged in, from a stream of near-end RMS samples while we
+    speak. Pure + tiny so the REAL harvested audio (tests/test_barge.py) validates the same
+    decision the live call makes. feed(t, rms) -> 'barge' (cut in -> stop talking), 'echo'
+    (suspiciously early sustained energy -> treat as device echo, go half-duplex), or None.
+    """
+
+    def __init__(self, thresh: float, debounce: int = BARGE_DEBOUNCE,
+                 early_sec: float = EARLY_BARGE_SEC):
+        self.thresh = thresh
+        self.debounce = debounce
+        self.early_sec = early_sec
+        self.over = 0
+
+    def feed(self, t: float, rms: float):
+        if rms > self.thresh:
+            self.over += 1
+            if self.over >= self.debounce:        # sustained, not a transient
+                self.over = 0
+                return "echo" if t < self.early_sec else "barge"
+        else:
+            self.over = 0
+        return None
+
+
 def _tail_rms(path: str, seconds: float = 0.25) -> float:
     """RMS of the last `seconds` of a (possibly still-growing) 16-bit mono WAV."""
     try:
@@ -420,8 +452,13 @@ class CallSession:
         self.ep.libCreate()
         cfg = pj.EpConfig()
         cfg.uaConfig.threadCnt = 1          # worker thread keeps the call alive
-        cfg.logConfig.level = 1
-        cfg.logConfig.consoleLevel = 0      # silence pjsua console spam (+ teardown warning)
+        # quiet by default; raise VOICE_CONSOLE_LEVEL (e.g. 5) to see SIP signaling, or set
+        # VOICE_LOG_FILE to capture full pjsua logs to a file for debugging
+        cfg.logConfig.level = int(os.environ.get("VOICE_LOG_LEVEL", "1"))
+        cfg.logConfig.consoleLevel = int(os.environ.get("VOICE_CONSOLE_LEVEL", "0"))
+        _logfile = os.environ.get("VOICE_LOG_FILE", "")
+        if _logfile:
+            cfg.logConfig.filename = _logfile
         self.ep.libInit(cfg)
 
         self.ep.transportCreate(pj.PJSIP_TRANSPORT_UDP, pj.TransportConfig())
@@ -440,6 +477,11 @@ class CallSession:
         acfg.sipConfig.proxies.append(SIP_PROXY)
         acfg.mediaConfig.srtpUse = pj.PJMEDIA_SRTP_MANDATORY
         acfg.mediaConfig.srtpSecureSignaling = 0
+        # RTP media port base. Default (0) keeps pjsua's 4000; override (VOICE_RTP_PORT) when
+        # a second instance must coexist with the running MCP server (which holds 4000/4002).
+        rtp_port = int(os.environ.get("VOICE_RTP_PORT", "0"))
+        if rtp_port:
+            acfg.mediaConfig.transportConfig.port = rtp_port
         self.acc = pj.Account()
         self.acc.create(acfg)
 
@@ -570,32 +612,32 @@ class CallSession:
         player.createPlayer(wav, pj.PJMEDIA_FILE_NO_LOOP)
         player.startTransmit(self.aud)
         start = time.time()
-        over = 0
         interrupted_at = None
         echo_mode = False
-        barge_thresh = _eff_threshold(barge_rms, self.noise_floor)  # clear ambient noise
+        # Barge threshold from the DURING-TX floor, not the pre-call noise floor: let our
+        # TTS establish briefly, measure the near-end level while the user is still
+        # listening, and key off that. Phone-side AEC keeps it low (~hundreds) so a real
+        # barge (thousands) clears it; an echoey device pushes it up and trips the echo guard.
+        time.sleep(0.4)
+        tx_floor = 0.0 if self.disconnected else _tail_rms(det_wav, 0.3)
+        barge_thresh = min(max(BARGE_RMS_MIN, tx_floor * 2.0), RMS_CAP)
+        barge = _BargeState(barge_thresh)
         while time.time() - start < dur + 0.2:
             time.sleep(0.08)
             if self.disconnected:
                 break
             if echo_mode:
                 continue                            # echo detected: just finish speaking
-            if _tail_rms(det_wav) > barge_thresh:   # something on the line while we talk
-                over += 1
-                if over >= BARGE_DEBOUNCE:          # sustained, not a noise transient
-                    t = time.time() - start
-                    if t < EARLY_BARGE_SEC:
-                        # too early to be a real interruption — almost certainly our own
-                        # voice echoing back off the user's speaker. Don't cut off; stop
-                        # barge for this turn and make the rest of the call half-duplex.
-                        echo_mode = True
-                        self.half_duplex = True
-                        over = 0
-                        continue
-                    interrupted_at = t
-                    break
-            else:
-                over = 0
+            verdict = barge.feed(time.time() - start, _tail_rms(det_wav))
+            if verdict == "echo":
+                # too early to be a real interruption — almost certainly our own voice
+                # echoing off a speaker (no phone AEC). Don't cut off; finish this line and
+                # make the rest of the call half-duplex.
+                echo_mode = True
+                self.half_duplex = True
+            elif verdict == "barge":
+                interrupted_at = time.time() - start
+                break
         try:
             player.stopTransmit(self.aud)
         except Exception:

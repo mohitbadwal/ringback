@@ -25,6 +25,7 @@ SUITE = [
     ("turn-logic (late-start fix, 1.5s endpoint, hallucination filter)", "test_turnlogic.py", SYS),
     ("frame-port de-risk (records the NO-GO finding)", "test_frameports.py", SYS),
     ("AEC core (echo cancellation on synthetic)", "test_aec.py", LIVEKIT_PY),
+    ("barge-in on REAL harvested audio (skips if no harvest)", "test_barge.py", SYS),
 ]
 
 
