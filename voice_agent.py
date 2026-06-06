@@ -67,9 +67,16 @@ HALF_DUPLEX = os.environ.get("VOICE_HALF_DUPLEX", "1").strip().lower() in ("1", 
 # missed it and cut us off. Wider window catches the echo early and flips to half-duplex.
 EARLY_BARGE_SEC = float(os.environ.get("VOICE_EARLY_BARGE_SEC", "2.0"))
 POST_SPEAK_DRAIN = float(os.environ.get("VOICE_POST_SPEAK_DRAIN", "0.35"))  # let echo tail clear
-# Turn-taking: end a listen turn if no real (whisper-detected) human word arrives within
-# this long — so we respond instead of waiting forever / on noise.
-NO_SPEECH_SEC = float(os.environ.get("VOICE_NO_SPEECH_SEC", "2.0"))
+# Turn-taking — TWO phases, because one tight timeout dropped real speech:
+#   START_TIMEOUT: how long to wait for the user's FIRST word before giving up. Must be
+#     generous — a 2.0s window guillotined anyone who paused to think before answering
+#     (reproduced offline in tests/test_capture.py: user starts at 2.5s -> captured "").
+#   END_SILENCE: once they HAVE spoken, end the turn this long after their last word —
+#     this is the responsive "stop after ~1.5s of no new words" endpoint.
+START_TIMEOUT = float(os.environ.get("VOICE_START_TIMEOUT", "4.0"))
+END_SILENCE = float(os.environ.get("VOICE_END_SILENCE", "1.5"))
+# legacy alias (older callers): treat NO_SPEECH_SEC as the start timeout
+NO_SPEECH_SEC = float(os.environ.get("VOICE_NO_SPEECH_SEC", str(START_TIMEOUT)))
 
 # Persistent whisper.cpp HTTP server: loads the model ONCE so each transcription is fast
 # inference (~0.1s) instead of a fresh whisper-cli model reload (~0.5-1.5s) — this is what
@@ -146,14 +153,36 @@ def _rm(path: str) -> None:
         pass
 
 
+# Whisper emits these bare phrases as HALLUCINATIONS on silence / non-speech audio. If they
+# slip through they look like the user spoke — flipping the turn into "they answered" and
+# then ending it 1.5s later, swallowing the real reply that follows. Matched only as the
+# WHOLE transcript (so "okay thanks for the help" is kept; a lone "Thanks for watching." is
+# dropped). Deliberately excludes real short answers like yes/no/okay/sure.
+_HALLUCINATIONS = {
+    "you", "thank you", "thanks", "thanks for watching", "thank you for watching",
+    "thank you.", "thanks for watching.", "bye", "bye.", "you're welcome",
+    "please subscribe", "subscribe", ".", "so", "uh", "um",
+}
+
+
+def _clean_text(text: str) -> str:
+    """Normalize whitespace and drop whisper non-speech artifacts (bracketed annotations
+    like [BLANK_AUDIO]/(silence), and bare silence-hallucinations). Returns "" if nothing
+    real was said."""
+    text = " ".join(text.split()).strip()
+    if not text:
+        return ""
+    if text.startswith(("[", "(")) and text.endswith(("]", ")")):
+        return ""
+    if text.strip(" .,!?-").lower() in _HALLUCINATIONS:
+        return ""
+    return text
+
+
 def _transcribe(wav: str) -> str:
     out = subprocess.run([WHISPER_BIN, "-m", WHISPER_MODEL, "-f", wav, "-nt", "-t", "8"],
                          capture_output=True, text=True)
-    text = " ".join(out.stdout.split()).strip()
-    # drop whisper non-speech annotations like [BLANK_AUDIO], [beep], (silence)
-    if not text or (text.startswith(("[", "(")) and text.endswith(("]", ")"))):
-        return ""
-    return text
+    return _clean_text(out.stdout)
 
 
 # --- persistent whisper-server: load model once (lazy), reap after idle ---------------
@@ -250,35 +279,50 @@ def _transcribe_stream(wav: str) -> str:
         with urllib.request.urlopen(req, timeout=6) as r:
             text = r.read().decode("utf-8", "ignore")
         _wsrv_last_use = time.time()
-        text = " ".join(text.split()).strip()
-        if not text or (text.startswith(("[", "(")) and text.endswith(("]", ")"))):
-            return ""
-        return text
+        return _clean_text(text)
     except Exception:
         return _transcribe(wav)
 
 
-_BEEP_WAV = "/tmp/voice_beep.wav"
+def _capture_turn(snapshot_fn, is_disconnected, max_sec: float = 15.0,
+                  start_timeout: float = START_TIMEOUT, end_silence: float = END_SILENCE) -> str:
+    """The streaming capture turn-loop, with NO pjsua2/SIP dependency so it can be
+    unit-tested with a file-fed audio source (see tests/test_capture.py).
 
+      snapshot_fn() -> path to a valid-header WAV of audio captured so far, or "".
+      is_disconnected() -> True if the call dropped (bail at once; returns None).
 
-def _ensure_beep() -> str:
-    """Generate a short 'your turn' beep once (16 kHz mono, fade in/out)."""
-    if os.path.exists(_BEEP_WAV):
-        return _BEEP_WAV
-    rate, dur, freq = 16000, 0.18, 880.0
-    n = int(rate * dur)
-    fade = int(rate * 0.02)
-    with wave.open(_BEEP_WAV, "wb") as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(rate)
-        buf = bytearray()
-        for i in range(n):
-            env = min(1.0, i / fade, (n - i) / fade)
-            val = int(0.5 * env * 32767 * math.sin(2 * math.pi * freq * i / rate))
-            buf += struct.pack("<h", val)
-        w.writeframes(bytes(buf))
-    return _BEEP_WAV
+    Transcribes the growing clip ~3x/sec via the persistent whisper-server, in TWO phases:
+      - BEFORE the first real word: wait up to `start_timeout` (generous — a thinking
+        pause must not end the turn). If still nothing -> "".
+      - AFTER the first word: end `end_silence` after the last new word (the responsive
+        endpoint). Returns the streamed transcript; the final re-transcribe is the caller's.
+    is_disconnected() -> returns None so the caller can surface [CALL ENDED].
+    """
+    start = time.time()
+    text = ""
+    last_word = None          # elapsed time when the transcript last gained new words
+    last_check = 0.0
+    while time.time() - start < max_sec:
+        time.sleep(0.1)
+        if is_disconnected():
+            return None
+        el = time.time() - start
+        if el >= 0.5 and (el - last_check) >= 0.3:
+            last_check = el
+            snap = snapshot_fn()
+            t = _transcribe_stream(snap) if snap else ""   # already hallucination-filtered
+            if snap:
+                _rm(snap)
+            if t and t != text:
+                last_word = el
+                text = t
+            if not text:
+                if el >= start_timeout:
+                    break                     # user never started speaking -> ""
+            elif last_word is not None and (el - last_word) >= end_silence:
+                break                         # they spoke, then went quiet -> end turn
+    return text
 
 
 def _tail_rms(path: str, seconds: float = 0.25) -> float:
@@ -445,63 +489,30 @@ class CallSession:
         _rm(wav)
         return "ended" if self.disconnected else "spoke"
 
-    def listen(self, max_sec: float = 15.0, silence_sec: float = 0.9,
-               no_speech_sec: float = NO_SPEECH_SEC) -> str:
-        """Capture one user turn, STREAMED through the persistent whisper-server (fast
-        in-process model — RMS dropped quiet speech in a noisy room). Records and
-        transcribes the growing clip ~3x/sec. The turn ends when:
-          (a) no human word is heard within `no_speech_sec` (default 2s)  -> "",
-          (b) words were heard, then ~`silence_sec` passes with no new words -> the text,
-          (c) the call drops (returns "" at once; caller surfaces [CALL ENDED]).
-        """
+    def listen(self, max_sec: float = 15.0, end_silence: float = END_SILENCE,
+               start_timeout: float = START_TIMEOUT) -> str:
+        """Capture one user turn, STREAMED through the persistent whisper-server. Records
+        and transcribes the growing clip ~3x/sec; the turn-end logic lives in the pure,
+        file-testable _capture_turn (two-phase: wait `start_timeout` for the first word,
+        then end `end_silence` after the last). No "your turn" beep — they just hear us
+        finish and reply, like a real call. Returns the user's words, or "" on silence /
+        hang-up (caller surfaces [SILENCE] / [CALL ENDED])."""
         self._reg()
         if not (self.connected and self.aud):
             return ""
-        # short beep so they know it's their turn
-        try:
-            beep = pj.AudioMediaPlayer()
-            beep.createPlayer(_ensure_beep(), pj.PJMEDIA_FILE_NO_LOOP)
-            beep.startTransmit(self.aud)
-            time.sleep(0.22)
-            beep.stopTransmit(self.aud)
-            del beep
-        except Exception:
-            pass
-        time.sleep(0.3)           # let the beep clear before recording
         rec_wav = tempfile.mktemp(suffix=".wav")
         rec = pj.AudioMediaRecorder()
         rec.createRecorder(rec_wav)
         self.aud.startTransmit(rec)
-        start = time.time()
-        text = ""
-        last_grow = None          # when the transcript last gained new words
-        last_check = 0.0
-        while time.time() - start < max_sec:
-            time.sleep(0.1)
-            if self.disconnected:         # hang-up -> bail AT ONCE
-                break
-            el = time.time() - start
-            # stream: transcribe the growing clip ~3x/sec (server makes this ~0.1s each)
-            if el >= 0.5 and (el - last_check) >= 0.3:
-                last_check = el
-                snap = _wav_snapshot(rec_wav)     # valid-header copy of audio-so-far
-                t = _transcribe_stream(snap) if snap else ""   # "" for noise/blank/non-speech
-                if snap:
-                    _rm(snap)
-                if t:
-                    if t != text:
-                        last_grow = el            # still producing new words
-                    text = t
-                if not text and el >= no_speech_sec:
-                    break                         # (a) no human word in N seconds -> end turn
-                if text and last_grow is not None and (el - last_grow) >= silence_sec:
-                    break                         # (b) finished speaking
+        # stream-capture via the pure, file-fed turn-loop (same code the tests exercise)
+        text = _capture_turn(lambda: _wav_snapshot(rec_wav), lambda: self.disconnected,
+                             max_sec=max_sec, start_timeout=start_timeout, end_silence=end_silence)
         try:
             self.aud.stopTransmit(rec)
         except Exception:
             pass
         del rec
-        if self.disconnected:
+        if text is None or self.disconnected:    # hang-up mid-turn
             _rm(rec_wav)
             return ""
         snap = _wav_snapshot(rec_wav)            # full audio with a correct header
@@ -540,7 +551,7 @@ class CallSession:
             user_text = ""
             if listen_after:
                 time.sleep(POST_SPEAK_DRAIN)   # let the echo of our last words die down
-                user_text = self.listen(max_sec=max_wait, silence_sec=silence_sec)
+                user_text = self.listen(max_sec=max_wait)
             self.log.append({"who": "claude", "text": text, "interrupted": False, "unsaid": ""})
             if user_text:
                 self.log.append({"who": "user", "text": user_text})
@@ -644,8 +655,8 @@ class CallSession:
                 user_text = _transcribe(cap_wav)
             _rm(cap_wav)
         elif listen_after:
-            # normal turn: use the robust whisper-driven listen (reliable capture + 3s rule)
-            user_text = self.listen(max_sec=max_wait, silence_sec=silence_sec)
+            # normal turn: robust whisper-driven listen (two-phase start/endpoint timing)
+            user_text = self.listen(max_sec=max_wait)
 
         _rm(wav)
         self.log.append({"who": "claude", "text": spoken,
@@ -691,7 +702,7 @@ if __name__ == "__main__":
     if not s.place_call():
         print("not answered"); s.shutdown(); raise SystemExit
     print("connected. speaking greeting.")
-    s.speak("Hi, this is your assistant. Say something after the beep, then pause.")
+    s.speak("Hi, this is your assistant. Say something, then pause.")
     print("listening...")
     said = s.listen()
     print("HEARD:", repr(said))
