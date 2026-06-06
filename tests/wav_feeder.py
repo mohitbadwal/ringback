@@ -18,7 +18,8 @@ import wave
 
 class GrowingWav:
     def __init__(self, src_wav: str, dst: str, rate: float = 1.0,
-                 start_delay: float = 0.0, chunk_sec: float = 0.1):
+                 start_delay: float = 0.0, chunk_sec: float = 0.1,
+                 trailing_silence: float = 0.0):
         with wave.open(src_wav, "rb") as w:
             self.sr = w.getframerate()
             self.ch = w.getnchannels()
@@ -28,8 +29,9 @@ class GrowingWav:
         self.rate = rate
         self.start_delay = start_delay
         self.chunk_sec = chunk_sec
-        self._stop = False
-        self._thread = None
+        self.trailing_silence = trailing_silence   # seconds of silence after the clip (the
+        self._stop = False                         # live recorder keeps capturing after they
+        self._thread = None                        # stop — needed to test end-of-turn detect)
         self.done = False
 
     def _write_stale_header(self) -> None:
@@ -55,6 +57,16 @@ class GrowingWav:
                 f.flush()
                 os.fsync(f.fileno())
                 i += chunk
+                time.sleep(self.chunk_sec / self.rate)
+            # trailing silence — the live recorder keeps writing after the user goes quiet
+            sil = b"\x00" * chunk
+            n_sil = int(self.trailing_silence / self.chunk_sec)
+            for _ in range(n_sil):
+                if self._stop:
+                    break
+                f.write(sil)
+                f.flush()
+                os.fsync(f.fileno())
                 time.sleep(self.chunk_sec / self.rate)
         self.done = True
 

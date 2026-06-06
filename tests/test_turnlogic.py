@@ -36,14 +36,17 @@ def check(name, cond, detail=""):
 
 def capture(fixture, rate=1.0, start_delay=0.0, disconnect_after=None):
     dst = tempfile.mktemp(suffix=".wav")
-    f = GrowingWav(os.path.join(FIX, fixture + ".wav"), dst, rate=rate, start_delay=start_delay).start()
+    # trailing silence so end-of-turn energy actually drops (the live recorder keeps going)
+    f = GrowingWav(os.path.join(FIX, fixture + ".wav"), dst, rate=rate,
+                   start_delay=start_delay, trailing_silence=2.5).start()
     flag = {"d": False}
     if disconnect_after is not None:
         import threading
         threading.Thread(target=lambda: (time.sleep(disconnect_after), flag.__setitem__("d", True)),
                          daemon=True).start()
     t0 = time.time()
-    streamed = va._capture_turn(lambda: va._wav_snapshot(dst), lambda: flag["d"], max_sec=22.0)
+    streamed = va._capture_turn(lambda: va._wav_snapshot(dst), lambda: flag["d"], max_sec=22.0,
+                                energy_fn=lambda: va._tail_rms(dst, 0.3))
     dt = time.time() - t0
     final = ""
     if streamed is not None:

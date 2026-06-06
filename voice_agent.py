@@ -82,6 +82,12 @@ POST_SPEAK_DRAIN = float(os.environ.get("VOICE_POST_SPEAK_DRAIN", "0.35"))  # le
 #     this is the responsive "stop after ~1.5s of no new words" endpoint.
 START_TIMEOUT = float(os.environ.get("VOICE_START_TIMEOUT", "4.0"))
 END_SILENCE = float(os.environ.get("VOICE_END_SILENCE", "1.5"))
+# End-of-turn is detected on AUDIO ENERGY, not whisper text: the user is "still talking"
+# while the near-end tail RMS is above this OR new words keep appearing. Keying purely off
+# the transcript hung for ~15s on real phone audio (whisper re-words the same clip every
+# poll, resetting the timer) and cutting on word-count plateaus chopped off real speech.
+# In-call silence measured ~150 vs speech ~2000+, so this cleanly separates them.
+LISTEN_END_RMS = float(os.environ.get("VOICE_LISTEN_END_RMS", "600"))
 # legacy alias (older callers): treat NO_SPEECH_SEC as the start timeout
 NO_SPEECH_SEC = float(os.environ.get("VOICE_NO_SPEECH_SEC", str(START_TIMEOUT)))
 
@@ -292,43 +298,53 @@ def _transcribe_stream(wav: str) -> str:
 
 
 def _capture_turn(snapshot_fn, is_disconnected, max_sec: float = 15.0,
-                  start_timeout: float = START_TIMEOUT, end_silence: float = END_SILENCE) -> str:
+                  start_timeout: float = START_TIMEOUT, end_silence: float = END_SILENCE,
+                  energy_fn=None, end_rms: float = LISTEN_END_RMS) -> str:
     """The streaming capture turn-loop, with NO pjsua2/SIP dependency so it can be
     unit-tested with a file-fed audio source (see tests/test_capture.py).
 
-      snapshot_fn() -> path to a valid-header WAV of audio captured so far, or "".
-      is_disconnected() -> True if the call dropped (bail at once; returns None).
+      snapshot_fn()    -> valid-header WAV path of audio captured so far, or "".
+      energy_fn()      -> tail RMS of the near-end (the robust "still talking?" signal).
+      is_disconnected()-> True if the call dropped (bail at once; returns None).
 
-    Transcribes the growing clip ~3x/sec via the persistent whisper-server, in TWO phases:
-      - BEFORE the first real word: wait up to `start_timeout` (generous — a thinking
-        pause must not end the turn). If still nothing -> "".
-      - AFTER the first word: end `end_silence` after the last new word (the responsive
-        endpoint). Returns the streamed transcript; the final re-transcribe is the caller's.
-    is_disconnected() -> returns None so the caller can surface [CALL ENDED].
+    The user counts as VOICED on a given poll if the near-end energy is above `end_rms` OR
+    a new word appeared. End-of-turn is then:
+      - BEFORE any voice: wait up to `start_timeout` (a thinking pause must not end it) -> "",
+      - AFTER voice: end `end_silence` after voice stops (energy fell silent AND no new words).
+    Energy — not transcript text — drives the endpoint, because whisper re-words the same
+    noisy clip every poll (held the turn open ~15s) and word-count plateaus chop real speech.
+    Returns the streamed transcript; the final re-transcribe is the caller's job.
     """
     start = time.time()
     text = ""
-    last_word = None          # elapsed time when the transcript last gained new words
+    max_words = 0
+    last_voice = None         # elapsed time we last saw speech energy or a new word
     last_check = 0.0
     while time.time() - start < max_sec:
         time.sleep(0.1)
         if is_disconnected():
             return None
         el = time.time() - start
-        if el >= 0.5 and (el - last_check) >= 0.3:
+        voiced = energy_fn is not None and energy_fn() > end_rms      # checked every poll
+        if el >= 0.5 and (el - last_check) >= 0.3:                    # transcribe ~3x/sec
             last_check = el
             snap = snapshot_fn()
             t = _transcribe_stream(snap) if snap else ""   # already hallucination-filtered
             if snap:
                 _rm(snap)
-            if t and t != text:
-                last_word = el
+            if t:
                 text = t
-            if not text:
-                if el >= start_timeout:
-                    break                     # user never started speaking -> ""
-            elif last_word is not None and (el - last_word) >= end_silence:
-                break                         # they spoke, then went quiet -> end turn
+                wc = len(t.split())
+                if wc > max_words:           # genuinely new words also count as voiced
+                    max_words = wc
+                    voiced = True
+        if voiced:
+            last_voice = el
+        if last_voice is None:
+            if el >= start_timeout:
+                break                         # never started speaking -> ""
+        elif (el - last_voice) >= end_silence:
+            break                             # voice stopped for end_silence -> end turn
     return text
 
 
@@ -546,9 +562,11 @@ class CallSession:
         rec = pj.AudioMediaRecorder()
         rec.createRecorder(rec_wav)
         self.aud.startTransmit(rec)
-        # stream-capture via the pure, file-fed turn-loop (same code the tests exercise)
+        # stream-capture via the pure, file-fed turn-loop (same code the tests exercise);
+        # energy_fn = near-end tail RMS is the robust "still talking?" signal for end-of-turn
         text = _capture_turn(lambda: _wav_snapshot(rec_wav), lambda: self.disconnected,
-                             max_sec=max_sec, start_timeout=start_timeout, end_silence=end_silence)
+                             max_sec=max_sec, start_timeout=start_timeout, end_silence=end_silence,
+                             energy_fn=lambda: _tail_rms(rec_wav, 0.3))
         try:
             self.aud.stopTransmit(rec)
         except Exception:

@@ -55,7 +55,7 @@ def run_capture(fixture: str, rate: float, label: str) -> dict:
     expected = open(os.path.join(FIX, fixture + ".txt")).read() if os.path.exists(
         os.path.join(FIX, fixture + ".txt")) else ""
     dst = tempfile.mktemp(suffix=".wav")
-    feeder = GrowingWav(src, dst, rate=rate).start()
+    feeder = GrowingWav(src, dst, rate=rate, trailing_silence=2.0).start()
 
     # wrap the REAL transcriber to log every poll (input audio-sec + output text)
     polls = []
@@ -70,7 +70,7 @@ def run_capture(fixture: str, rate: float, label: str) -> dict:
     va._transcribe_stream = logged
     try:
         streamed = va._capture_turn(lambda: va._wav_snapshot(dst), lambda: False,
-                                    max_sec=20.0)
+                                    max_sec=20.0, energy_fn=lambda: va._tail_rms(dst, 0.3))
         final = _final_snapshot_transcribe(dst)
     finally:
         va._transcribe_stream = real_ts
