@@ -668,34 +668,11 @@ class CallSession:
         # --- phase 2: capture the user's reply ---
         user_text = ""
         if interrupted:
-            # they cut in mid-sentence (already talking) — capture the rest, no beep,
-            # ending when they fall silent. whisper validates (noise -> "").
-            cap_wav = tempfile.mktemp(suffix=".wav")
-            cap = pj.AudioMediaRecorder()
-            cap.createRecorder(cap_wav)
-            self.aud.startTransmit(cap)
-            silence_since = None
-            t0 = time.time()
-            cap_thresh = _eff_threshold(barge_rms, self.noise_floor, LISTEN_NOISE_FACTOR)
-            while time.time() - t0 < max_wait:
-                time.sleep(0.08)
-                if self.disconnected:
-                    break
-                if _tail_rms(cap_wav) > cap_thresh:
-                    silence_since = None
-                else:
-                    if silence_since is None:
-                        silence_since = time.time()
-                    elif time.time() - silence_since > silence_sec:
-                        break
-            try:
-                self.aud.stopTransmit(cap)
-            except Exception:
-                pass
-            del cap
-            if not self.disconnected:
-                user_text = _transcribe(cap_wav)
-            _rm(cap_wav)
+            # they cut in (already talking) — capture the rest the SAME fast streaming way
+            # as a normal reply (whisper-server, ends ~END_SILENCE after they stop). This
+            # used to record the whole interruption then transcribe it ONCE with slow
+            # whisper-cli, which made post-barge replies take ~20s on a real call.
+            user_text = self.listen(max_sec=max_wait)
         elif listen_after:
             # normal turn: robust whisper-driven listen (two-phase start/endpoint timing)
             user_text = self.listen(max_sec=max_wait)
