@@ -112,6 +112,33 @@ def _wav_duration(path: str) -> float:
         return w.getnframes() / float(w.getframerate())
 
 
+def _wav_snapshot(src: str) -> str:
+    """Rewrite a still-being-recorded WAV with a CORRECT length header so a transcriber
+    sees ALL audio captured so far. An in-progress pjsua recorder leaves the data-size
+    field stale (set at close), so reading it directly yields only a fragment. Returns a
+    temp path (caller removes it) or "" if there's no audio yet."""
+    try:
+        with open(src, "rb") as f:
+            head = f.read(44)
+            if len(head) < 44 or head[:4] != b"RIFF":
+                return ""
+            ch = struct.unpack_from("<H", head, 22)[0] or 1
+            sr = struct.unpack_from("<I", head, 24)[0]
+            bits = struct.unpack_from("<H", head, 34)[0] or 16
+            pcm = f.read()                       # everything written so far, past the header
+    except OSError:
+        return ""
+    if not pcm or sr == 0:
+        return ""
+    dst = tempfile.mktemp(suffix=".wav")
+    with wave.open(dst, "wb") as w:
+        w.setnchannels(ch)
+        w.setsampwidth(bits // 8)
+        w.setframerate(sr)
+        w.writeframes(pcm)
+    return dst
+
+
 def _rm(path: str) -> None:
     try:
         os.remove(path)
@@ -457,7 +484,10 @@ class CallSession:
             # stream: transcribe the growing clip ~3x/sec (server makes this ~0.1s each)
             if el >= 0.5 and (el - last_check) >= 0.3:
                 last_check = el
-                t = _transcribe_stream(rec_wav)   # returns "" for noise/blank/non-speech
+                snap = _wav_snapshot(rec_wav)     # valid-header copy of audio-so-far
+                t = _transcribe_stream(snap) if snap else ""   # "" for noise/blank/non-speech
+                if snap:
+                    _rm(snap)
                 if t:
                     if t != text:
                         last_grow = el            # still producing new words
@@ -474,7 +504,10 @@ class CallSession:
         if self.disconnected:
             _rm(rec_wav)
             return ""
-        final = _transcribe_stream(rec_wav)
+        snap = _wav_snapshot(rec_wav)            # full audio with a correct header
+        final = _transcribe_stream(snap) if snap else ""
+        if snap:
+            _rm(snap)
         _rm(rec_wav)
         return final or text
 
