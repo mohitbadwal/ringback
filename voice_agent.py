@@ -578,6 +578,9 @@ class CallSession:
         barge-in is skipped: we speak fully, drain the echo tail, then listen.
         """
         self._reg()
+        _t0 = time.time()
+        _tlog = ((lambda m: print("[timing] +%5.2fs %s" % (time.time() - _t0, m), flush=True))
+                 if os.environ.get("VOICE_TIMING") else (lambda m: None))
         if not (self.connected and self.aud):
             return {"ok": False, "ended": self.disconnected, "user": "",
                     "interrupted": False, "spoken": "", "unsaid": ""}
@@ -602,6 +605,7 @@ class CallSession:
 
         wav = _tts_to_wav(text)
         dur = _wav_duration(wav)
+        _tlog("TTS generated (%.1fs of audio to speak)" % dur)
 
         # --- phase 1: speak while a throwaway recorder senses barge-in ---
         det_wav = tempfile.mktemp(suffix=".wav")
@@ -657,6 +661,7 @@ class CallSession:
                     "spoken": text, "unsaid": "", "user": ""}
 
         interrupted = interrupted_at is not None
+        _tlog("speech phase done (interrupted=%s)" % interrupted)
         words = text.split()
         if interrupted:
             frac = min(1.0, interrupted_at / max(dur, 0.1))
@@ -676,6 +681,7 @@ class CallSession:
         elif listen_after:
             # normal turn: robust whisper-driven listen (two-phase start/endpoint timing)
             user_text = self.listen(max_sec=max_wait)
+        _tlog("capture/listen done -> %r (total converse engine time)" % (user_text[:40]))
 
         _rm(wav)
         self.log.append({"who": "claude", "text": spoken,
