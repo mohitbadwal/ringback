@@ -10,6 +10,7 @@ Launched via run_voice_mcp.sh, which sets PYTHONPATH/DYLD_LIBRARY_PATH so
 `import voice_agent` (pjsua2) works.
 """
 import os
+import time
 from mcp.server.fastmcp import FastMCP
 import voice_agent
 
@@ -67,9 +68,9 @@ def call_start(opening_line: str) -> str:
          failed. Want me to walk you through it?")   # dials, speaks, returns reply
       2. reply = converse("<your short response>")    # speaks + listens, each turn
       3. repeat step 2 for every turn
-      4. say_and_end("<closing line>")  to deliver your FINAL message and hang up in
-         one step (no awkward wait), OR call_end() when the user signals they're done
-         ("bye", "that's all") OR a reply is "[CALL ENDED]"
+      4. call_end("<closing line>")  to speak your FINAL message and hang up in one
+         step (no awkward wait), OR call_end() with no text when the user signals
+         they're done ("bye", "that's all") OR a reply is "[CALL ENDED]"
 
     Keep every spoken line SHORT and conversational — 1-2 sentences, like a real
     phone call. Returns the user's first words, or "[NO ANSWER]" if they didn't
@@ -152,25 +153,8 @@ def speak(text: str) -> str:
     s.speak(text)                       # PURE TTS: say it and return, do NOT listen
     if s.disconnected:
         return "[CALL ENDED]"
-    return ("spoke (call still open). Call listen() for their reply, or say_and_end() "
-            "to deliver a final line and hang up.")
-
-
-@mcp.tool()
-def say_and_end(text: str) -> str:
-    """Speak a final line, then hang up immediately — no waiting for a reply.
-
-    Use this for your CLOSING message ("Talk soon", "I'll call back when it's done").
-    Unlike speak()+listen() or converse(), this does NOT wait for the user to respond:
-    it speaks `text` and ends the call right away, so there's no awkward silence at the
-    end. Use it whenever you know it's the last thing you need to say.
-    """
-    s = _get()
-    if not s.connected:
-        return "[NO ACTIVE CALL]"
-    s.speak(text)
-    s.hangup()
-    return "spoke final line and hung up"
+    return ('spoke (call still open). Call listen() for their reply, or '
+            'call_end("final line") to deliver a closing line and hang up.')
 
 
 @mcp.tool()
@@ -194,11 +178,20 @@ def listen() -> str:
 
 
 @mcp.tool()
-def call_end() -> str:
-    """Hang up the current call. Call this when the conversation is finished."""
+def call_end(text: str = "") -> str:
+    """Hang up the current call — optionally speaking one final line first.
+
+    If `text` is given, it speaks that line, waits ~1 second so the words fully
+    reach the user before the line drops, then hangs up — with NO waiting for a
+    reply. Use this for your closing message ("Talk soon", "I'll call back when
+    it's done"). Call with no argument to just hang up.
+    """
     s = _get()
+    if text and s.connected:
+        s.speak(text)            # pure TTS, no listening
+        time.sleep(1.0)          # let the final words fully land before hanging up
     s.hangup()
-    return "call ended"
+    return "spoke final line and hung up" if text else "call ended"
 
 
 @mcp.tool()
