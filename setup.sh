@@ -75,6 +75,24 @@ fi
 [ -f "$MODEL_DIR/$WHISPER_MODEL_NAME" ] \
   || { echo "ERROR: whisper model missing at $MODEL_DIR/$WHISPER_MODEL_NAME"; exit 1; }
 
+# --- Piper neural TTS (the cross-platform default voice) — BEST EFFORT ----------
+# Piper is the default TTS everywhere. On macOS, if it can't install (e.g. no onnxruntime
+# wheel for your Python), that's fine: the engine auto-falls back to `say`, so this step
+# never blocks setup and your existing macOS behavior is preserved.
+say_step "5b/6 Installing Piper TTS + voice (best-effort; falls back to macOS 'say')"
+PIPER_DIR="$HOME/.piper-voices"; PIPER_VOICE="en_US-lessac-medium"
+mkdir -p "$PIPER_DIR"
+if "$PYTHON_BIN" -m pip install --quiet piper-tts 2>/dev/null \
+   || "$PYTHON_BIN" -m pip install --quiet --break-system-packages piper-tts 2>/dev/null; then
+  PV="https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium"
+  for f in "$PIPER_VOICE.onnx" "$PIPER_VOICE.onnx.json"; do
+    [ -f "$PIPER_DIR/$f" ] || curl -fL --progress-bar "$PV/$f" -o "$PIPER_DIR/$f" || true
+  done
+  echo "  Piper installed (voice: $PIPER_DIR/$PIPER_VOICE.onnx). Force the macOS voice with VOICE_TTS=say."
+else
+  echo "  Piper not installed — using macOS 'say' (totally fine). Re-run later to add it."
+fi
+
 say_step "6/6 Installing Python deps (mcp, httpx) into $PYTHON_BIN"
 # (--break-system-packages fallback for Homebrew/PEP-668 "externally-managed" pythons)
 "$PYTHON_BIN" -m pip install --quiet "mcp>=1.2.0" httpx \

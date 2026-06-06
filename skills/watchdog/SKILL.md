@@ -88,10 +88,20 @@ Run the `condition` check. Classify the result:
 - **NEEDS-USER** — finished, failed, blocked on a decision, or hit the alert condition → continue to step 3.
 
 ### 3. Measure presence (am I away?)
-Get current HID idle seconds:
+Get current input-idle seconds. The canonical, cross-platform implementation is
+`platform_compat.hid_idle_seconds()` in the ringback repo — prefer it:
 ```bash
-ioreg -c IOHIDSystem | awk '/HIDIdleTime/ {print int($NF/1000000000); exit}'
+python3 -c "import sys; sys.path.insert(0,'<ringback-dir>'); import platform_compat as p; print(int(p.hid_idle_seconds()))"
 ```
+Or the native command for your OS:
+```bash
+# macOS:
+ioreg -c IOHIDSystem | awk '/HIDIdleTime/ {print int($NF/1000000000); exit}'
+# Linux (X11):    xprintidle | awk '{print int($1/1000)}'
+# Windows:        GetLastInputInfo via Win32 (see platform_compat._idle_windows)
+```
+On Wayland/headless where idle can't be read, set `RINGBACK_PRESENCE=absent` to allow
+escalation (or `present` to suppress it).
 - **ACTIVE** if idle `< 120s` → you're at the keyboard. Do NOT alert or call. Post the status in **chat only** (that's the right channel when you're looking at the screen), set `rung` appropriately, and finish. If you'd previously `warned`/`alerted`, note "you're back — handling in chat" and reset `rung` to `monitoring` (de-escalated).
 - **AWAY** if idle `>= 300s` → escalation allowed; go to step 4.
 - **In-between (120–300s)** → treat as borderline-present: post chat status, hold escalation one more tick, leave `rung` unchanged.

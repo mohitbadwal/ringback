@@ -1,39 +1,42 @@
 #!/usr/bin/env python3
 """Generate deterministic audio fixtures for the offline voice harness.
 
-Uses macOS `say` + ffmpeg to synthesize 16 kHz mono 16-bit WAVs (the format the
-live recorder produces), so the capture/turn-logic/AEC tests run with NO phone
-call. Each speech fixture also writes a `.txt` with its expected transcript.
+Synthesizes 16 kHz mono 16-bit WAVs (the format the live recorder produces) via the
+cross-platform TTS seam (platform_compat.synthesize_to_wav — Piper by default, else the
+OS-native voice), so the capture/turn-logic/AEC tests run with NO phone call on macOS,
+Linux, or in the Docker image. Each speech fixture also writes a `.txt` with its expected
+transcript (the tests assert on word overlap, so the exact voice doesn't matter).
 
 Run:  python3 tests/gen_fixtures.py
 Output: tests/fixtures/*.wav (+ *.txt)
 """
 import os
 import struct
-import subprocess
+import sys
 import wave
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+from platform_compat import synthesize_to_wav  # noqa: E402
+
 FIX = os.path.join(HERE, "fixtures")
 SR = 16000
 
-# (name, voice, text) — distinctive words so asserts are unambiguous.
+# (name, text) — distinctive words so the asserts are unambiguous.
 SPEECH = [
-    ("long_sentence", "Samantha",
+    ("long_sentence",
      "Let's go with the production database migration tonight, "
      "and roll back immediately if the error rate climbs above five percent."),
-    ("short_reply", "Samantha", "Yes, go with production."),
-    ("mid_sentence", "Daniel",
+    ("short_reply", "Yes, go with production."),
+    ("mid_sentence",
      "I think we should wait until the weekend before deploying this change."),
 ]
 
 
-def _say_wav(text: str, voice: str, dst: str) -> None:
-    aiff = dst + ".aiff"
-    subprocess.run(["say", "-v", voice, "-o", aiff, text], check=True)
-    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", aiff,
-                    "-ar", str(SR), "-ac", "1", "-acodec", "pcm_s16le", dst], check=True)
-    os.remove(aiff)
+def _synth_wav(text: str, dst: str) -> None:
+    synthesize_to_wav(text, dst)   # any engine -> 16 kHz mono 16-bit WAV
 
 
 def _silence_wav(dst: str, seconds: float) -> None:
@@ -66,9 +69,9 @@ def _noisy_speech(src_wav: str, dst: str, noise_amp: int = 600) -> None:
 
 def main() -> None:
     os.makedirs(FIX, exist_ok=True)
-    for name, voice, text in SPEECH:
+    for name, text in SPEECH:
         wav = os.path.join(FIX, name + ".wav")
-        _say_wav(text, voice, wav)
+        _synth_wav(text, wav)
         with open(os.path.join(FIX, name + ".txt"), "w") as f:
             f.write(text)
         dur = wave.open(wav, "rb").getnframes() / SR

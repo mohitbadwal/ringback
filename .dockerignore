@@ -1,0 +1,40 @@
+# Keep the build context small AND private. The image COPYs only what it needs;
+# this guarantees secrets and personal data never enter the build context.
+
+# secrets / local SIP identity
+voice.env
+alert.env
+*.docker.env
+.env
+.env.example
+
+# PRIVATE: the user's harvested voice recordings (never ship these)
+tests/fixtures/real/
+
+# generated audio (regenerated inside the container via gen_fixtures.py)
+*.wav
+*.aiff
+
+# large model blobs (the image downloads its own)
+*.bin
+models/
+
+# python / vcs / caches
+__pycache__/
+*.pyc
+.venv/
+venv/
+.git/
+.gitignore
+
+# local runtime logs/state
+channel/outbound.jsonl
+channel/*.log
+channel/.call_active
+channel/.stop_hook_state.json
+ntfy/*.db
+
+# build artifacts / docs not needed at runtime
+dist/
+build/
+docs/
