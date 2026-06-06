@@ -22,13 +22,16 @@ away → agent blocks/asks → call-driver phones you → you answer →
 > Proven: an idle interactive Claude Code session **does** wake on an inbound channel
 > event and act on it (~5–6s latency), verified against Claude Code 2.1.x.
 
-## Thin prototype (what's here now)
-Real phone audio comes later (it'll reuse `voice_agent.py`'s `CallSession`). For now the
-call-driver is faked by `inject.sh` so we can prove the *session-wakes-and-continues* loop:
-
+## Components
 - `ringback_channel.mjs` — the channel MCP (zero-dep Node). Loopback HTTP `/inject`
-  (answers in) + a `say` tool (Claude's words out, logged to `outbound.jsonl`).
-- `inject.sh` — stand-in for the call-driver: type what you'd have said on the phone.
+  (answers in) + tools `ask_user_by_phone` (start a call to ask the away user) and
+  `say` (speak back on the live call, logged to `outbound.jsonl`).
+- `call_driver.py` — the **real** call-driver: dials you (imports `voice_agent.CallSession`
+  unchanged), speaks the question, transcribes your reply, POSTs it to `/inject`, then
+  relays the session's `say` replies back onto the call. Run via `run_call_driver.sh`.
+- `run_session.sh` — launches a session with the channel attached, in bypass posture.
+- `inject.sh` — no-phone stand-in for the call-driver: type what you'd have said, to test
+  the channel half without dialing.
 - `ringback.mcp.json` — registers the channel.
 
 ## Two requirements the loop needs (verified the hard way)
@@ -61,6 +64,24 @@ watch it here:
 ```bash
 tail -f channel/outbound.jsonl
 ```
+
+## Real phone flow (autonomous)
+With the call-driver wired, the agent reaches you **by phone on its own**:
+
+```
+session (run_session.sh) → agent needs a decision, you're away →
+  agent calls ask_user_by_phone("staging or production?") → channel spawns call_driver.py →
+  📞 your phone rings → you answer + speak → transcribed → POST /inject →
+  idle session WAKES → decides → say(...) → call_driver speaks it back on the call
+```
+
+Verified end-to-end with a real call: the agent dialed unprompted, the spoken answer woke
+the session, and it confirmed the choice out loud — no manual orchestration.
+
+**Requirement:** the call-driver needs your SIP password to place the call. Put
+`VOICE_SIP_PASS` in `voice.env` (gitignored) so `run_call_driver.sh` picks it up, **or**
+export it in the environment you launch `run_session.sh` from (the channel passes its env
+to the spawned call-driver). Same SIP/Linphone account `ringback-voice` uses.
 
 ## Notes
 - The HTTP endpoint binds **127.0.0.1 only**. Set `RINGBACK_CHANNEL_TOKEN` to require an
