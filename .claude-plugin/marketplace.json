@@ -1,0 +1,15 @@
+{
+  "name": "ringback-local",
+  "owner": { "name": "Mohit Badwal" },
+  "metadata": {
+    "description": "Local marketplace for the ringback phone channel (run it in-place from this repo).",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "ringback",
+      "source": "./channel",
+      "description": "Phone channel — the agent reaches an away user by voice and the session wakes on their reply."
+    }
+  ]
+}

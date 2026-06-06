@@ -83,6 +83,37 @@ the session, and it confirmed the choice out loud — no manual orchestration.
 export it in the environment you launch `run_session.sh` from (the channel passes its env
 to the spawned call-driver). Same SIP/Linphone account `ringback-voice` uses.
 
+## Fully automatic (Stop hook)
+The agent reaching you via `ask_user_by_phone` is the precise path. As a **backstop**,
+`stop_hook.py` (wired in the repo `.claude/settings.json`) fires on every turn end and
+phones you **even if the agent didn't call the tool** — but only when ALL of these hold:
+
+1. ringback is configured (SIP creds present) — else it's completely inert,
+2. you're **away** (macOS HID idle > `RINGBACK_AWAY_IDLE_SEC`, default 300s),
+3. no call is already active (a `channel/.call_active` lockfile coordinates with `ask_user_by_phone`),
+4. the agent's last message is a question, and
+5. it hasn't already handled this turn.
+
+It reads the question from the transcript and dials via the same call-driver. To disable,
+remove the `Stop` hook from `.claude/settings.json`. Test without dialing:
+`RINGBACK_HOOK_DRYRUN=1 RINGBACK_AWAY_IDLE_SEC=0` (logs the decision to `channel/stop_hook.log`).
+
+## Install as a plugin (scaffold — see caveat)
+A plugin scaffold is included (`channel/.claude-plugin/plugin.json`, `channel/.mcp.json`,
+and a local `/.claude-plugin/marketplace.json`) so ringback can be distributed and launched
+as `--channels plugin:ringback@<marketplace>`:
+```bash
+# from a session, interactively:
+/plugin marketplace add /Users/mohitbadwal/PycharmProjects/phone-alert-mcp
+/plugin install ringback@ringback-local
+```
+**Caveat (verified on the current research-preview build):** custom channels are gated by an
+*approved-channels allowlist*, so `--channels plugin:…` still shows the "development channels"
+warning (or refuses) unless the channel is allowlisted. Until then, **`run_session.sh` (dev flag)
+is the working launch.** Also, a marketplace install *copies* the plugin — set `RINGBACK_REPO`
+to your ringback checkout so the copied channel can still find the call-driver
+(`voice_agent.py` + the pjsua2 build, which don't travel with the copy).
+
 ## Notes
 - The HTTP endpoint binds **127.0.0.1 only**. Set `RINGBACK_CHANNEL_TOKEN` to require an
   `X-Ringback-Token` header on `/inject`. Override the port with `RINGBACK_CHANNEL_PORT`.

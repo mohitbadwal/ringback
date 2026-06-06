@@ -30,6 +30,12 @@ import { spawn } from 'node:child_process';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.join(HERE, '..');
+// Where the call-driver lives. Defaults to this dir (repo-local). If this channel
+// is installed as a COPIED plugin elsewhere, set RINGBACK_REPO to your ringback
+// checkout so the call-driver (which needs voice_agent.py + the pjsua2 build) is found.
+const CALL_HOME = process.env.RINGBACK_REPO
+  ? path.join(path.resolve(process.env.RINGBACK_REPO), 'channel')
+  : HERE;
 const PORT = parseInt(process.env.RINGBACK_CHANNEL_PORT || '8790', 10);
 const HOST = '127.0.0.1'; // loopback ONLY — never bind a public interface
 const TOKEN = (process.env.RINGBACK_CHANNEL_TOKEN || '').trim(); // optional shared secret
@@ -138,9 +144,9 @@ function handleRpc(msg) {
         const out = fs.openSync(CALL_DRIVER_LOG, 'a');
         // detached: the call outlives this tool call; the answer returns async via /inject.
         const child = spawn('bash',
-          [path.join(HERE, 'run_call_driver.sh'),
+          [path.join(CALL_HOME, 'run_call_driver.sh'),
            '--question', question, '--call-id', 'phone', '--say-wait', '45'],
-          { cwd: REPO_ROOT, env: { ...process.env, RINGBACK_CHANNEL_PORT: String(PORT) },
+          { cwd: path.join(CALL_HOME, '..'), env: { ...process.env, RINGBACK_CHANNEL_PORT: String(PORT) },
             detached: true, stdio: ['ignore', out, out] });
         child.on('error', (e) => log(`call-driver spawn error: ${e.message}`));
         child.unref();
