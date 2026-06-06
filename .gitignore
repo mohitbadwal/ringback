@@ -16,6 +16,8 @@ venv/
 # --- local runtime data ---
 ntfy/*.db
 *.wav
+channel/outbound.jsonl
+channel/ringback_channel.log
 
 # --- large downloaded artifacts (fetched by setup.sh) ---
 *.bin

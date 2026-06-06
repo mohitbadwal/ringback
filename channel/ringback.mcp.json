@@ -1,0 +1,9 @@
+{
+  "_comment": "Registers the ringback channel as an MCP server. Launch from the repo root with: claude --mcp-config channel/ringback.mcp.json --strict-mcp-config --dangerously-load-development-channels server:ringback   (package as a plugin to drop the dev flag).",
+  "mcpServers": {
+    "ringback": {
+      "command": "node",
+      "args": ["channel/ringback_channel.mjs"]
+    }
+  }
+}
