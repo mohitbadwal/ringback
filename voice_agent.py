@@ -65,6 +65,9 @@ HALF_DUPLEX = os.environ.get("VOICE_HALF_DUPLEX", "").strip().lower() in ("1", "
 # missed it and cut us off. Wider window catches the echo early and flips to half-duplex.
 EARLY_BARGE_SEC = float(os.environ.get("VOICE_EARLY_BARGE_SEC", "2.0"))
 POST_SPEAK_DRAIN = float(os.environ.get("VOICE_POST_SPEAK_DRAIN", "0.35"))  # let echo tail clear
+# Turn-taking: end a listen turn if no real (whisper-detected) human word arrives within
+# this long — so we respond instead of waiting forever / on noise.
+NO_SPEECH_SEC = float(os.environ.get("VOICE_NO_SPEECH_SEC", "3.0"))
 
 
 def _eff_threshold(base: float, noise_floor: float, factor: float = NOISE_FACTOR) -> float:
@@ -285,24 +288,32 @@ class CallSession:
         player = pj.AudioMediaPlayer()
         player.createPlayer(wav, pj.PJMEDIA_FILE_NO_LOOP)
         player.startTransmit(self.aud)
-        self._pump(dur + 0.3)     # play to completion
+        end = time.time() + dur + 0.3
+        while time.time() < end:        # poll so a hang-up stops us AT ONCE, not after the whole line
+            time.sleep(0.05)
+            if self.disconnected:
+                break
         try:
             player.stopTransmit(self.aud)
         except Exception:
             pass
         del player
-        try:
-            os.remove(wav)
-        except OSError:
-            pass
-        return "spoke"
+        _rm(wav)
+        return "ended" if self.disconnected else "spoke"
 
-    def listen(self, max_sec: float = 15.0, silence_sec: float = 1.4,
-               rms_thresh: float = LISTEN_RMS_BASE) -> str:
+    def listen(self, max_sec: float = 15.0, silence_sec: float = 1.2,
+               no_speech_sec: float = NO_SPEECH_SEC) -> str:
+        """Capture one user turn, driven by WHISPER (not RMS — that dropped quiet
+        speech in a noisy room). Records continuously and lets whisper decide whether
+        there's a real word. The turn ends when:
+          (a) no human word is heard within `no_speech_sec` (default 3s)  -> "",
+          (b) words were heard, then ~`silence_sec` passes with no new words -> the text,
+          (c) the call drops (returns "" at once; caller surfaces [CALL ENDED]).
+        """
         self._reg()
         if not (self.connected and self.aud):
             return ""
-        # play a short beep so the user knows it's their turn to talk
+        # short beep so they know it's their turn
         try:
             beep = pj.AudioMediaPlayer()
             beep.createPlayer(_ensure_beep(), pj.PJMEDIA_FILE_NO_LOOP)
@@ -312,47 +323,43 @@ class CallSession:
             del beep
         except Exception:
             pass
-        time.sleep(0.45)          # let the beep + its echo clear before recording
+        time.sleep(0.3)           # let the beep clear before recording
         rec_wav = tempfile.mktemp(suffix=".wav")
         rec = pj.AudioMediaRecorder()
         rec.createRecorder(rec_wav)
         self.aud.startTransmit(rec)
         start = time.time()
-        heard = False
-        silence_since = None
-        over = 0                  # consecutive over-threshold polls (debounce)
-        grace = 0.4               # ignore residual beep echo at the very start
-        thresh = _eff_threshold(rms_thresh, self.noise_floor, LISTEN_NOISE_FACTOR)  # gentler: still hear the user
+        text = ""
+        last_grow = None          # when the transcript last gained new words
+        last_check = 0.0
         while time.time() - start < max_sec:
-            time.sleep(0.1)
-            if time.time() - start < grace:
-                continue          # don't judge speech during the grace window
-            lvl = _tail_rms(rec_wav)
-            if lvl > thresh:
-                over += 1
-                if over >= LISTEN_DEBOUNCE:   # need sustained sound, not a blip/echo
-                    heard = True
-                silence_since = None
-            else:
-                over = 0
-                if heard:         # only end the turn AFTER real speech began
-                    if silence_since is None:
-                        silence_since = time.time()
-                    elif time.time() - silence_since > silence_sec:
-                        break
-            if self.disconnected:
+            time.sleep(0.15)
+            if self.disconnected:         # hang-up -> bail AT ONCE
                 break
+            el = time.time() - start
+            # transcribe the growing clip every ~0.9s (need ~1s of audio first)
+            if el >= 1.0 and (el - last_check) >= 0.9:
+                last_check = el
+                t = _transcribe(rec_wav)          # returns "" for noise/blank/non-speech
+                if t:
+                    if t != text:
+                        last_grow = el            # still producing new words
+                    text = t
+                if not text and el >= no_speech_sec:
+                    break                         # (a) no human word in N seconds -> end turn
+                if text and last_grow is not None and (el - last_grow) >= silence_sec:
+                    break                         # (b) finished speaking
         try:
             self.aud.stopTransmit(rec)
         except Exception:
             pass
         del rec
-        text = _transcribe(rec_wav) if heard else ""
-        try:
-            os.remove(rec_wav)
-        except OSError:
-            pass
-        return text
+        if self.disconnected:
+            _rm(rec_wav)
+            return ""
+        final = _transcribe(rec_wav)
+        _rm(rec_wav)
+        return final or text
 
     def speak_interruptible(self, text: str, listen_after: bool = True,
                             silence_sec: float = 1.0, max_wait: float = 15.0,
@@ -455,43 +462,40 @@ class CallSession:
         else:
             spoken, unsaid = text, ""
 
-        # --- phase 2: FRESH recorder captures only the user's words (clean clip) ---
+        # --- phase 2: capture the user's reply ---
         user_text = ""
-        if interrupted or listen_after:
+        if interrupted:
+            # they cut in mid-sentence (already talking) — capture the rest, no beep,
+            # ending when they fall silent. whisper validates (noise -> "").
             cap_wav = tempfile.mktemp(suffix=".wav")
             cap = pj.AudioMediaRecorder()
             cap.createRecorder(cap_wav)
             self.aud.startTransmit(cap)
-            heard = interrupted                     # if they cut in, already talking
             silence_since = None
-            o2 = 0
             t0 = time.time()
-            cap_thresh = _eff_threshold(barge_rms, self.noise_floor, LISTEN_NOISE_FACTOR)  # capturing the user: be sensitive
+            cap_thresh = _eff_threshold(barge_rms, self.noise_floor, LISTEN_NOISE_FACTOR)
             while time.time() - t0 < max_wait:
                 time.sleep(0.08)
                 if self.disconnected:
                     break
                 if _tail_rms(cap_wav) > cap_thresh:
-                    o2 += 1
-                    if o2 >= LISTEN_DEBOUNCE:
-                        heard = True
                     silence_since = None
                 else:
-                    o2 = 0
-                    if heard:
-                        if silence_since is None:
-                            silence_since = time.time()
-                        elif time.time() - silence_since > silence_sec:
-                            break
+                    if silence_since is None:
+                        silence_since = time.time()
+                    elif time.time() - silence_since > silence_sec:
+                        break
             try:
                 self.aud.stopTransmit(cap)
             except Exception:
                 pass
             del cap
-            # skip transcription entirely if they hung up (instant return)
-            if not self.disconnected and heard:
+            if not self.disconnected:
                 user_text = _transcribe(cap_wav)
             _rm(cap_wav)
+        elif listen_after:
+            # normal turn: use the robust whisper-driven listen (reliable capture + 3s rule)
+            user_text = self.listen(max_sec=max_wait, silence_sec=silence_sec)
 
         _rm(wav)
         self.log.append({"who": "claude", "text": spoken,

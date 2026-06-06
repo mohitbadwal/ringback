@@ -188,7 +188,9 @@ def call_end(text: str = "") -> str:
     """
     s = _get()
     if text and s.connected:
-        s.speak(text)            # pure TTS, no listening
+        s.speak(text)            # pure TTS; returns AT ONCE if the user hangs up mid-line
+        if s.disconnected:
+            return "[CALL ENDED] — the user had already hung up; closing line not delivered"
         time.sleep(1.0)          # let the final words fully land before hanging up
     s.hangup()
     return "spoke final line and hung up" if text else "call ended"
