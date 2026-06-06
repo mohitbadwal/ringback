@@ -67,8 +67,9 @@ def call_start(opening_line: str) -> str:
          failed. Want me to walk you through it?")   # dials, speaks, returns reply
       2. reply = converse("<your short response>")    # speaks + listens, each turn
       3. repeat step 2 for every turn
-      4. call_end()  when the user signals they're done ("bye", "that's all",
-         "I'm done") OR when a reply is "[CALL ENDED]"
+      4. say_and_end("<closing line>")  to deliver your FINAL message and hang up in
+         one step (no awkward wait), OR call_end() when the user signals they're done
+         ("bye", "that's all") OR a reply is "[CALL ENDED]"
 
     Keep every spoken line SHORT and conversational — 1-2 sentences, like a real
     phone call. Returns the user's first words, or "[NO ANSWER]" if they didn't
@@ -148,8 +149,28 @@ def speak(text: str) -> str:
     s = _get()
     if not s.connected:
         return "[NO ACTIVE CALL] — call call_start first"
-    # interruptible turn: speak WHILE listening for barge-in, then capture reply
-    return _format_turn(s.speak_interruptible(text))
+    s.speak(text)                       # PURE TTS: say it and return, do NOT listen
+    if s.disconnected:
+        return "[CALL ENDED]"
+    return ("spoke (call still open). Call listen() for their reply, or say_and_end() "
+            "to deliver a final line and hang up.")
+
+
+@mcp.tool()
+def say_and_end(text: str) -> str:
+    """Speak a final line, then hang up immediately — no waiting for a reply.
+
+    Use this for your CLOSING message ("Talk soon", "I'll call back when it's done").
+    Unlike speak()+listen() or converse(), this does NOT wait for the user to respond:
+    it speaks `text` and ends the call right away, so there's no awkward silence at the
+    end. Use it whenever you know it's the last thing you need to say.
+    """
+    s = _get()
+    if not s.connected:
+        return "[NO ACTIVE CALL]"
+    s.speak(text)
+    s.hangup()
+    return "spoke final line and hung up"
 
 
 @mcp.tool()

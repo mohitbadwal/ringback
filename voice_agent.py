@@ -36,6 +36,24 @@ WHISPER_MODEL = os.environ.get("WHISPER_MODEL",
                                os.path.expanduser("~/.whisper-models/ggml-small.en.bin"))
 FFMPEG = os.environ.get("FFMPEG_BIN", "ffmpeg")
 
+# Voice-activity thresholds. Background noise was falsely triggering barge-in, so
+# these are now (a) env-tunable and (b) raised at call time by a measured noise floor
+# (CallSession.place_call -> _measure_rms). Real speech must clear the effective
+# threshold = clamp(max(base, noise_floor * NOISE_FACTOR), .., RMS_CAP).
+BARGE_RMS_BASE = float(os.environ.get("VOICE_BARGE_RMS", "550"))
+LISTEN_RMS_BASE = float(os.environ.get("VOICE_LISTEN_RMS", "320"))
+NOISE_FACTOR = float(os.environ.get("VOICE_NOISE_FACTOR", "2.5"))
+RMS_CAP = float(os.environ.get("VOICE_RMS_CAP", "3000"))  # never raise threshold above this
+# Debounce: consecutive over-threshold polls required to count as real speech (not a
+# transient). Higher = more noise-robust, slightly less instant barge-in.
+BARGE_DEBOUNCE = int(os.environ.get("VOICE_BARGE_DEBOUNCE", "5"))    # ~0.40s at 0.08s/poll
+LISTEN_DEBOUNCE = int(os.environ.get("VOICE_LISTEN_DEBOUNCE", "3"))  # ~0.30s at 0.10s/poll
+
+
+def _eff_threshold(base: float, noise_floor: float) -> float:
+    """Speech threshold = base, raised to clear measured ambient noise, then capped."""
+    return min(max(base, noise_floor * NOISE_FACTOR), RMS_CAP)
+
 
 def _tts_to_wav(text: str) -> str:
     """macOS `say` -> 16 kHz mono 16-bit WAV (pjsua2 resamples as needed)."""
@@ -146,6 +164,7 @@ class CallSession:
         self.connected = False
         self.disconnected = False
         self.last_state = None
+        self.noise_floor = 0.0  # ambient RMS measured at call connect (see place_call)
         self.log = []          # unified conversation timeline (claude + user turns)
 
     def _pump(self, seconds: float):
@@ -161,13 +180,36 @@ class CallSession:
         except Exception:
             pass
 
+    def _measure_rms(self, duration: float = 0.6) -> float:
+        """Sample ambient audio (right after answer, before anyone speaks) to learn
+        the background noise floor, so thresholds can be raised to clear it."""
+        self._reg()
+        if not (self.connected and self.aud):
+            return 0.0
+        wav = tempfile.mktemp(suffix=".wav")
+        try:
+            rec = pj.AudioMediaRecorder()
+            rec.createRecorder(wav)
+            self.aud.startTransmit(rec)
+            time.sleep(duration)
+            try:
+                self.aud.stopTransmit(rec)
+            except Exception:
+                pass
+            del rec
+            return _tail_rms(wav, seconds=duration)
+        except Exception:
+            return 0.0
+        finally:
+            _rm(wav)
+
     def start_lib(self):
         self.ep = pj.Endpoint()
         self.ep.libCreate()
         cfg = pj.EpConfig()
         cfg.uaConfig.threadCnt = 1          # worker thread keeps the call alive
-        cfg.logConfig.level = 2
-        cfg.logConfig.consoleLevel = 2
+        cfg.logConfig.level = 1
+        cfg.logConfig.consoleLevel = 0      # silence pjsua console spam (+ teardown warning)
         self.ep.libInit(cfg)
 
         self.ep.transportCreate(pj.PJSIP_TRANSPORT_UDP, pj.TransportConfig())
@@ -205,6 +247,7 @@ class CallSession:
             time.sleep(0.1)
             if self.connected and self.aud is not None:
                 time.sleep(0.4)   # let media settle
+                self.noise_floor = self._measure_rms(0.6)   # calibrate to ambient noise
                 return True
             if self.disconnected:
                 return False
@@ -256,14 +299,15 @@ class CallSession:
         silence_since = None
         over = 0                  # consecutive over-threshold polls (debounce)
         grace = 0.4               # ignore residual beep echo at the very start
+        thresh = _eff_threshold(rms_thresh, self.noise_floor)   # clear ambient noise
         while time.time() - start < max_sec:
             time.sleep(0.1)
             if time.time() - start < grace:
                 continue          # don't judge speech during the grace window
             lvl = _tail_rms(rec_wav)
-            if lvl > rms_thresh:
+            if lvl > thresh:
                 over += 1
-                if over >= 2:     # need ~0.2s of real sound, not a blip/echo
+                if over >= LISTEN_DEBOUNCE:   # need sustained sound, not a blip/echo
                     heard = True
                 silence_since = None
             else:
@@ -316,13 +360,14 @@ class CallSession:
         start = time.time()
         over = 0
         interrupted_at = None
+        barge_thresh = _eff_threshold(barge_rms, self.noise_floor)  # clear ambient noise
         while time.time() - start < dur + 0.2:
             time.sleep(0.08)
             if self.disconnected:
                 break
-            if _tail_rms(det_wav) > barge_rms:      # user talking over us
+            if _tail_rms(det_wav) > barge_thresh:   # user talking over us
                 over += 1
-                if over >= 2:
+                if over >= BARGE_DEBOUNCE:          # sustained, not a noise transient
                     interrupted_at = time.time() - start
                     break
             else:
@@ -369,9 +414,9 @@ class CallSession:
                 time.sleep(0.08)
                 if self.disconnected:
                     break
-                if _tail_rms(cap_wav) > barge_rms:
+                if _tail_rms(cap_wav) > barge_thresh:
                     o2 += 1
-                    if o2 >= 2:
+                    if o2 >= BARGE_DEBOUNCE:
                         heard = True
                     silence_since = None
                 else:
