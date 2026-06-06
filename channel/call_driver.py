@@ -30,6 +30,7 @@ import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUTBOUND = os.path.join(HERE, "outbound.jsonl")   # where the channel logs Claude's `say`
+LOCK = os.path.join(HERE, ".call_active")          # cross-process "a call is in flight"
 
 
 def post_inject(url: str, content: str, call_id: str, token: str = "") -> int:
@@ -115,63 +116,76 @@ def main() -> int:
     if not args.question:
         ap.error("--question is required (unless --dry-run)")
 
+    # cross-process call lock so the Stop hook / ask_user_by_phone don't double-dial
+    try:
+        with open(LOCK, "w") as f:
+            json.dump({"by": "call_driver", "ts": time.time()}, f)
+    except OSError:
+        pass
+
     s = CallSession()
-    s.start_lib()
-    print("placing call...", flush=True)
-    if not s.place_call():
-        print("call not answered", flush=True)
-        s.shutdown()
-        return 1
-    print("connected.", flush=True)
-    start = time.time()
-    baseline = outbound_line_count()
+    try:
+        s.start_lib()
+        print("placing call...", flush=True)
+        if not s.place_call():
+            print("call not answered", flush=True)
+            s.shutdown()
+            return 1
+        print("connected.", flush=True)
+        start = time.time()
+        baseline = outbound_line_count()
 
-    # 1) ask the question; capture the spoken answer (one retry if we miss it)
-    s.speak(args.question)
-    ans = s.listen()
-    if not ans:
-        s.speak("Sorry, I didn't catch that. Please say it again after the beep.")
+        # 1) ask the question; capture the spoken answer (one retry if we miss it)
+        s.speak(args.question)
         ans = s.listen()
-    print("HEARD:", repr(ans), flush=True)
-    if ans and not args.no_inject:
+        if not ans:
+            s.speak("Sorry, I didn't catch that. Please say it again after the beep.")
+            ans = s.listen()
+        print("HEARD:", repr(ans), flush=True)
+        if ans and not args.no_inject:
+            try:
+                post_inject(args.channel_url, ans, args.call_id, args.token)
+                print("posted answer to channel /inject", flush=True)
+            except Exception as e:  # noqa: BLE001
+                print("inject failed:", e, flush=True)
+
+        # 2) relay the session's `say` replies back onto the call; answer follow-ups
+        if not args.no_inject:
+            while time.time() - start < args.max_call_sec and not s.disconnected:
+                recs = []
+                wait_end = time.time() + args.say_wait
+                while time.time() < wait_end and not s.disconnected:
+                    recs, baseline = read_new_says(baseline)
+                    if recs:
+                        break
+                    time.sleep(0.5)
+                if not recs:
+                    break  # session went quiet -> wrap up the call
+                for rec in recs:
+                    txt = (rec.get("text") or "").strip()
+                    if not txt:
+                        continue
+                    print("SAY -> speak:", txt, flush=True)
+                    s.speak(txt)
+                    if looks_like_question(txt):
+                        follow = s.listen()
+                        print("HEARD:", repr(follow), flush=True)
+                        if follow:
+                            try:
+                                post_inject(args.channel_url, follow, args.call_id, args.token)
+                            except Exception as e:  # noqa: BLE001
+                                print("inject failed:", e, flush=True)
+
+        s.speak("Okay, talk to you later.")
+        s.hangup()
+        s.shutdown()
+        print("call ended", flush=True)
+        return 0
+    finally:
         try:
-            post_inject(args.channel_url, ans, args.call_id, args.token)
-            print("posted answer to channel /inject", flush=True)
-        except Exception as e:  # noqa: BLE001
-            print("inject failed:", e, flush=True)
-
-    # 2) relay the session's `say` replies back onto the call; answer follow-ups
-    if not args.no_inject:
-        while time.time() - start < args.max_call_sec and not s.disconnected:
-            recs = []
-            wait_end = time.time() + args.say_wait
-            while time.time() < wait_end and not s.disconnected:
-                recs, baseline = read_new_says(baseline)
-                if recs:
-                    break
-                time.sleep(0.5)
-            if not recs:
-                break  # session went quiet -> wrap up the call
-            for rec in recs:
-                txt = (rec.get("text") or "").strip()
-                if not txt:
-                    continue
-                print("SAY -> speak:", txt, flush=True)
-                s.speak(txt)
-                if looks_like_question(txt):
-                    follow = s.listen()
-                    print("HEARD:", repr(follow), flush=True)
-                    if follow:
-                        try:
-                            post_inject(args.channel_url, follow, args.call_id, args.token)
-                        except Exception as e:  # noqa: BLE001
-                            print("inject failed:", e, flush=True)
-
-    s.speak("Okay, talk to you later.")
-    s.hangup()
-    s.shutdown()
-    print("call ended", flush=True)
-    return 0
+            os.remove(LOCK)
+        except OSError:
+            pass
 
 
 if __name__ == "__main__":

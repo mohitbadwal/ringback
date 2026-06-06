@@ -36,7 +36,13 @@ const TOKEN = (process.env.RINGBACK_CHANNEL_TOKEN || '').trim(); // optional sha
 const OUTBOUND = path.join(HERE, 'outbound.jsonl'); // what Claude `say`s back (the "call")
 const DEBUG = path.join(HERE, 'ringback_channel.log');
 const CALL_DRIVER_LOG = path.join(HERE, 'call_driver.log');
+const LOCK = path.join(HERE, '.call_active'); // cross-process "a call is in flight"
 let activeCall = null; // the spawned call-driver child, while a call is in flight
+
+function callInFlight() {
+  if (activeCall && activeCall.exitCode === null) return true;
+  try { return (Date.now() - fs.statSync(LOCK).mtimeMs) < 900000; } catch { return false; }
+}
 
 const log = (m) => { try { fs.appendFileSync(DEBUG, `[${new Date().toISOString()}] ${m}\n`); } catch {} };
 
@@ -121,12 +127,14 @@ function handleRpc(msg) {
         send({ jsonrpc: '2.0', id, error: { code: -32602, message: 'question is required' } });
         return;
       }
-      if (activeCall && activeCall.exitCode === null) {
+      if (callInFlight()) {
         send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text',
           text: 'A phone call is already in progress — not starting another. Wait for the answer.' }] } });
         return;
       }
       try {
+        // claim the lock BEFORE spawning so the Stop hook can't also dial (race-free)
+        try { fs.writeFileSync(LOCK, JSON.stringify({ by: 'ask_user_by_phone', ts: Date.now() })); } catch {}
         const out = fs.openSync(CALL_DRIVER_LOG, 'a');
         // detached: the call outlives this tool call; the answer returns async via /inject.
         const child = spawn('bash',

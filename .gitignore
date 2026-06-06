@@ -19,6 +19,9 @@ ntfy/*.db
 channel/outbound.jsonl
 channel/ringback_channel.log
 channel/call_driver.log
+channel/stop_hook.log
+channel/.call_active
+channel/.stop_hook_state.json
 
 # --- large downloaded artifacts (fetched by setup.sh) ---
 *.bin
