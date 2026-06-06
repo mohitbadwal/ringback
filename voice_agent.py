@@ -59,7 +59,11 @@ LISTEN_DEBOUNCE = int(os.environ.get("VOICE_LISTEN_DEBOUNCE", "3"))  # ~0.30s at
 # the call to half-duplex (speak fully, then listen) so echo can't cut us off.
 # VOICE_HALF_DUPLEX=1 forces it on from the first word (e.g. if you know it's on speaker).
 HALF_DUPLEX = os.environ.get("VOICE_HALF_DUPLEX", "").strip().lower() in ("1", "true", "yes")
-EARLY_BARGE_SEC = float(os.environ.get("VOICE_EARLY_BARGE_SEC", "0.6"))
+# A "barge" within the first EARLY_BARGE_SEC of our own speech = our echo, not the user
+# (a real person doesn't interrupt before hearing a couple seconds). 2.0s, because on a
+# loudspeaker the echo barge only debounces past threshold at ~0.7-0.9s — a 0.6s window
+# missed it and cut us off. Wider window catches the echo early and flips to half-duplex.
+EARLY_BARGE_SEC = float(os.environ.get("VOICE_EARLY_BARGE_SEC", "2.0"))
 POST_SPEAK_DRAIN = float(os.environ.get("VOICE_POST_SPEAK_DRAIN", "0.35"))  # let echo tail clear
 
 
