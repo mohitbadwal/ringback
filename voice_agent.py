@@ -49,6 +49,15 @@ RMS_CAP = float(os.environ.get("VOICE_RMS_CAP", "3000"))  # never raise threshol
 BARGE_DEBOUNCE = int(os.environ.get("VOICE_BARGE_DEBOUNCE", "5"))    # ~0.40s at 0.08s/poll
 LISTEN_DEBOUNCE = int(os.environ.get("VOICE_LISTEN_DEBOUNCE", "3"))  # ~0.30s at 0.10s/poll
 
+# Speakerphone echo: the user's speaker plays our TTS back into their mic, which can
+# look like the user interrupting. We auto-detect it — a "barge" within the first
+# EARLY_BARGE_SEC of our own speech is almost always our echo, not the user — and switch
+# the call to half-duplex (speak fully, then listen) so echo can't cut us off.
+# VOICE_HALF_DUPLEX=1 forces it on from the first word (e.g. if you know it's on speaker).
+HALF_DUPLEX = os.environ.get("VOICE_HALF_DUPLEX", "").strip().lower() in ("1", "true", "yes")
+EARLY_BARGE_SEC = float(os.environ.get("VOICE_EARLY_BARGE_SEC", "0.6"))
+POST_SPEAK_DRAIN = float(os.environ.get("VOICE_POST_SPEAK_DRAIN", "0.35"))  # let echo tail clear
+
 
 def _eff_threshold(base: float, noise_floor: float) -> float:
     """Speech threshold = base, raised to clear measured ambient noise, then capped."""
@@ -165,6 +174,7 @@ class CallSession:
         self.disconnected = False
         self.last_state = None
         self.noise_floor = 0.0  # ambient RMS measured at call connect (see place_call)
+        self.half_duplex = HALF_DUPLEX  # flips on if speaker echo is detected mid-call
         self.log = []          # unified conversation timeline (claude + user turns)
 
     def _pump(self, seconds: float):
@@ -236,6 +246,7 @@ class CallSession:
         self._reg()
         self.connected = False
         self.disconnected = False
+        self.half_duplex = HALF_DUPLEX   # re-evaluate echo per call (unless forced on)
         self.aud = None
         if self.call is not None:        # clear any previous call object
             self.call = None
@@ -275,7 +286,7 @@ class CallSession:
         return "spoke"
 
     def listen(self, max_sec: float = 15.0, silence_sec: float = 1.4,
-               rms_thresh: float = 300.0) -> str:
+               rms_thresh: float = LISTEN_RMS_BASE) -> str:
         self._reg()
         if not (self.connected and self.aud):
             return ""
@@ -333,18 +344,39 @@ class CallSession:
 
     def speak_interruptible(self, text: str, listen_after: bool = True,
                             silence_sec: float = 1.0, max_wait: float = 15.0,
-                            barge_rms: float = 500.0) -> dict:
+                            barge_rms: float = BARGE_RMS_BASE) -> dict:
         """Speak `text` while monitoring for the user talking over us (barge-in).
 
         If the user starts talking, we stop speaking immediately, note how far we
         got, and capture what they said. If we finish uninterrupted, we then
         listen for their reply (when listen_after). Returns a dict describing the
         turn and appends to self.log (the unified transcript).
+
+        If the call is in half-duplex (speaker echo detected, or VOICE_HALF_DUPLEX),
+        barge-in is skipped: we speak fully, drain the echo tail, then listen.
         """
         self._reg()
         if not (self.connected and self.aud):
             return {"ok": False, "ended": self.disconnected, "user": "",
                     "interrupted": False, "spoken": "", "unsaid": ""}
+
+        if self.half_duplex:
+            # echo-safe: don't listen for barge while speaking (our own voice coming
+            # back off the user's speaker would trigger it). Speak fully, then listen.
+            self.speak(text)
+            if self.disconnected:
+                self.log.append({"who": "claude", "text": text, "interrupted": False, "unsaid": ""})
+                return {"ok": True, "ended": True, "interrupted": False,
+                        "spoken": text, "unsaid": "", "user": ""}
+            user_text = ""
+            if listen_after:
+                time.sleep(POST_SPEAK_DRAIN)   # let the echo of our last words die down
+                user_text = self.listen(max_sec=max_wait, silence_sec=silence_sec)
+            self.log.append({"who": "claude", "text": text, "interrupted": False, "unsaid": ""})
+            if user_text:
+                self.log.append({"who": "user", "text": user_text})
+            return {"ok": True, "interrupted": False, "spoken": text, "unsaid": "",
+                    "user": user_text, "ended": self.disconnected}
 
         wav = _tts_to_wav(text)
         dur = _wav_duration(wav)
@@ -360,15 +392,27 @@ class CallSession:
         start = time.time()
         over = 0
         interrupted_at = None
+        echo_mode = False
         barge_thresh = _eff_threshold(barge_rms, self.noise_floor)  # clear ambient noise
         while time.time() - start < dur + 0.2:
             time.sleep(0.08)
             if self.disconnected:
                 break
-            if _tail_rms(det_wav) > barge_thresh:   # user talking over us
+            if echo_mode:
+                continue                            # echo detected: just finish speaking
+            if _tail_rms(det_wav) > barge_thresh:   # something on the line while we talk
                 over += 1
                 if over >= BARGE_DEBOUNCE:          # sustained, not a noise transient
-                    interrupted_at = time.time() - start
+                    t = time.time() - start
+                    if t < EARLY_BARGE_SEC:
+                        # too early to be a real interruption — almost certainly our own
+                        # voice echoing back off the user's speaker. Don't cut off; stop
+                        # barge for this turn and make the rest of the call half-duplex.
+                        echo_mode = True
+                        self.half_duplex = True
+                        over = 0
+                        continue
+                    interrupted_at = t
                     break
             else:
                 over = 0
