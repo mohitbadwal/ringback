@@ -16,6 +16,8 @@ import struct
 import subprocess
 import tempfile
 import time
+import urllib.error
+import urllib.request
 import wave
 
 import pjsua2 as pj
@@ -67,7 +69,19 @@ EARLY_BARGE_SEC = float(os.environ.get("VOICE_EARLY_BARGE_SEC", "2.0"))
 POST_SPEAK_DRAIN = float(os.environ.get("VOICE_POST_SPEAK_DRAIN", "0.35"))  # let echo tail clear
 # Turn-taking: end a listen turn if no real (whisper-detected) human word arrives within
 # this long — so we respond instead of waiting forever / on noise.
-NO_SPEECH_SEC = float(os.environ.get("VOICE_NO_SPEECH_SEC", "3.0"))
+NO_SPEECH_SEC = float(os.environ.get("VOICE_NO_SPEECH_SEC", "2.0"))
+
+# Persistent whisper.cpp HTTP server: loads the model ONCE so each transcription is fast
+# inference (~0.1s) instead of a fresh whisper-cli model reload (~0.5-1.5s) — this is what
+# makes streaming capture (transcribe a window ~3x/sec) fast enough. Lazy: started on the
+# first transcription of a call; reaped after WHISPER_SERVER_IDLE_SEC idle to free memory.
+# Falls back to whisper-cli if it can't start.
+WHISPER_SERVER_BIN = os.environ.get("WHISPER_SERVER_BIN", "whisper-server")
+WHISPER_SERVER_MODEL = os.environ.get("WHISPER_SERVER_MODEL",
+                                      os.path.expanduser("~/.whisper-models/ggml-base.en.bin"))
+WHISPER_SERVER_HOST = os.environ.get("WHISPER_SERVER_HOST", "127.0.0.1")
+WHISPER_SERVER_PORT = int(os.environ.get("WHISPER_SERVER_PORT", "8642"))
+WHISPER_SERVER_IDLE_SEC = float(os.environ.get("WHISPER_SERVER_IDLE_SEC", "300"))  # GC after 5 min idle
 
 
 def _eff_threshold(base: float, noise_floor: float, factor: float = NOISE_FACTOR) -> float:
@@ -113,6 +127,108 @@ def _transcribe(wav: str) -> str:
     if not text or (text.startswith(("[", "(")) and text.endswith(("]", ")"))):
         return ""
     return text
+
+
+# --- persistent whisper-server: load model once (lazy), reap after idle ---------------
+import threading
+
+_WSRV_URL = f"http://{WHISPER_SERVER_HOST}:{WHISPER_SERVER_PORT}"
+_wsrv_proc = None
+_wsrv_last_use = 0.0
+_wsrv_lock = threading.Lock()
+_wsrv_reaper = None
+
+
+def _wsrv_health() -> bool:
+    try:
+        urllib.request.urlopen(_WSRV_URL + "/", timeout=1)
+        return True
+    except urllib.error.HTTPError:
+        return True       # server answered (e.g. 404) -> it's up
+    except Exception:
+        return False      # connection refused / timeout -> down
+
+
+def _wsrv_reaper_loop():
+    global _wsrv_proc
+    while True:
+        time.sleep(20)
+        with _wsrv_lock:
+            if _wsrv_proc is None:
+                return
+            if time.time() - _wsrv_last_use > WHISPER_SERVER_IDLE_SEC:
+                try:
+                    _wsrv_proc.terminate()
+                except Exception:
+                    pass
+                _wsrv_proc = None
+                return    # idle too long -> freed; a future call re-spawns + re-arms
+
+
+def _wsrv_spawn():
+    """Start the server if it isn't up (non-blocking) and arm the idle reaper."""
+    global _wsrv_proc, _wsrv_reaper, _wsrv_last_use
+    with _wsrv_lock:
+        if _wsrv_health() or (_wsrv_proc is not None and _wsrv_proc.poll() is None):
+            return
+        try:
+            _wsrv_proc = subprocess.Popen(
+                [WHISPER_SERVER_BIN, "-m", WHISPER_SERVER_MODEL,
+                 "--host", WHISPER_SERVER_HOST, "--port", str(WHISPER_SERVER_PORT)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+            _wsrv_last_use = time.time()
+        except FileNotFoundError:
+            _wsrv_proc = None
+            return
+        if _wsrv_reaper is None or not _wsrv_reaper.is_alive():
+            _wsrv_reaper = threading.Thread(target=_wsrv_reaper_loop, daemon=True)
+            _wsrv_reaper.start()
+
+
+def _wsrv_warm():
+    """Kick off the model load now (e.g. when a call connects) without blocking."""
+    if not _wsrv_health():
+        _wsrv_spawn()
+
+
+def _wsrv_ready(wait_sec: float = 12.0) -> bool:
+    if _wsrv_health():
+        return True
+    _wsrv_spawn()
+    end = time.time() + wait_sec
+    while time.time() < end:
+        if _wsrv_health():
+            return True
+        time.sleep(0.2)
+    return False
+
+
+def _transcribe_stream(wav: str) -> str:
+    """Fast transcription via the persistent whisper-server; whisper-cli fallback."""
+    global _wsrv_last_use
+    if not _wsrv_ready():
+        return _transcribe(wav)
+    try:
+        with open(wav, "rb") as f:
+            audio = f.read()
+        b = "----rbkboundary"
+        body = (
+            (f'--{b}\r\nContent-Disposition: form-data; name="file"; filename="a.wav"\r\n'
+             f'Content-Type: audio/wav\r\n\r\n').encode() + audio +
+            (f'\r\n--{b}\r\nContent-Disposition: form-data; name="response_format"\r\n\r\n'
+             f'text\r\n--{b}--\r\n').encode())
+        req = urllib.request.Request(
+            _WSRV_URL + "/inference", data=body,
+            headers={"Content-Type": f"multipart/form-data; boundary={b}"})
+        with urllib.request.urlopen(req, timeout=6) as r:
+            text = r.read().decode("utf-8", "ignore")
+        _wsrv_last_use = time.time()
+        text = " ".join(text.split()).strip()
+        if not text or (text.startswith(("[", "(")) and text.endswith(("]", ")"))):
+            return ""
+        return text
+    except Exception:
+        return _transcribe(wav)
 
 
 _BEEP_WAV = "/tmp/voice_beep.wav"
@@ -274,6 +390,7 @@ class CallSession:
             if self.connected and self.aud is not None:
                 time.sleep(0.4)   # let media settle
                 self.noise_floor = self._measure_rms(0.6)   # calibrate to ambient noise
+                _wsrv_warm()   # lazily start the whisper-server now so it's ready to capture
                 return True
             if self.disconnected:
                 return False
@@ -301,12 +418,12 @@ class CallSession:
         _rm(wav)
         return "ended" if self.disconnected else "spoke"
 
-    def listen(self, max_sec: float = 15.0, silence_sec: float = 1.2,
+    def listen(self, max_sec: float = 15.0, silence_sec: float = 0.9,
                no_speech_sec: float = NO_SPEECH_SEC) -> str:
-        """Capture one user turn, driven by WHISPER (not RMS — that dropped quiet
-        speech in a noisy room). Records continuously and lets whisper decide whether
-        there's a real word. The turn ends when:
-          (a) no human word is heard within `no_speech_sec` (default 3s)  -> "",
+        """Capture one user turn, STREAMED through the persistent whisper-server (fast
+        in-process model — RMS dropped quiet speech in a noisy room). Records and
+        transcribes the growing clip ~3x/sec. The turn ends when:
+          (a) no human word is heard within `no_speech_sec` (default 2s)  -> "",
           (b) words were heard, then ~`silence_sec` passes with no new words -> the text,
           (c) the call drops (returns "" at once; caller surfaces [CALL ENDED]).
         """
@@ -333,14 +450,14 @@ class CallSession:
         last_grow = None          # when the transcript last gained new words
         last_check = 0.0
         while time.time() - start < max_sec:
-            time.sleep(0.15)
+            time.sleep(0.1)
             if self.disconnected:         # hang-up -> bail AT ONCE
                 break
             el = time.time() - start
-            # transcribe the growing clip every ~0.9s (need ~1s of audio first)
-            if el >= 1.0 and (el - last_check) >= 0.9:
+            # stream: transcribe the growing clip ~3x/sec (server makes this ~0.1s each)
+            if el >= 0.5 and (el - last_check) >= 0.3:
                 last_check = el
-                t = _transcribe(rec_wav)          # returns "" for noise/blank/non-speech
+                t = _transcribe_stream(rec_wav)   # returns "" for noise/blank/non-speech
                 if t:
                     if t != text:
                         last_grow = el            # still producing new words
@@ -357,7 +474,7 @@ class CallSession:
         if self.disconnected:
             _rm(rec_wav)
             return ""
-        final = _transcribe(rec_wav)
+        final = _transcribe_stream(rec_wav)
         _rm(rec_wav)
         return final or text
 
