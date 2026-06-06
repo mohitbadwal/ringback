@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "ringback": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/ringback_channel.mjs"]
+    }
+  }
+}
