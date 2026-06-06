@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
-"""Prove the echo failure class AND that AEC fixes it — fully offline.
+"""Verify the AEC core does the job barge-in actually needs: kill our ECHO ENERGY while
+preserving the user's voice — so the RMS barge detector fires on the user, not on our
+echo. (Echo masking whisper TRANSCRIPTION turned out NOT to be the issue — whisper is
+robust to linear echo; AEC's payoff is the RMS separation. See plan / test_capture.py.)
 
-  near = user's voice + delayed/attenuated copy of OUR TTS (speaker echo) + noise.
-  1. transcribe the RAW near-end  -> expect contamination / dropped user words (the bug),
-  2. run it through aec.AecProcessor (feed_far = our TTS, process_near = near),
-  3. transcribe the CLEANED near-end -> expect the user's words recovered.
-
-Run under the python that has livekit:  /opt/anaconda3/bin/python3 tests/test_aec.py
+Synthetic here (proves the math + chunking wrapper). The REAL speakerphone-echo tuning is
+tests/tune_aec.py against harvested audio. Run under a livekit python:
+    /opt/anaconda3/bin/python3 tests/test_aec.py
 """
 import importlib.util
 import os
-import re
 import struct
 import sys
 import tempfile
@@ -21,7 +20,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 sys.path.insert(0, ROOT)
-from mix_echo import mix_echo, SR  # noqa: E402
+from mix_echo import SR, _read  # noqa: E402
 import aec  # noqa: E402
 
 pj = types.ModuleType("pjsua2")
@@ -32,72 +31,60 @@ va = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(va)
 
 FIX = os.path.join(HERE, "fixtures")
+import math
 
 
-def _words(s):
-    return [w for w in re.sub(r"[^a-z0-9 ]", " ", s.lower()).split() if w]
-
-
-def _overlap(expected, got):
-    exp, g = _words(expected), set(_words(got))
-    return sum(1 for w in exp if w in g) / len(exp) if exp else 0.0
-
-
-def _transcribe_pcm(pcm: bytes) -> str:
-    dst = tempfile.mktemp(suffix=".wav")
-    with wave.open(dst, "wb") as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(SR)
-        w.writeframes(pcm)
-    out = va._transcribe_stream(dst)
-    va._rm(dst)
-    return out
-
-
-def _aec_clean(near_wav: str, far_pcm: bytes, delay_ms: float) -> bytes:
-    """Feed far (our TTS) + near in lockstep 20 ms chunks; return cleaned PCM."""
-    with wave.open(near_wav, "rb") as w:
-        near = w.readframes(w.getnframes())
-    proc = aec.AecProcessor(delay_ms=delay_ms)
-    CH = 640  # 20 ms @ 16 kHz int16 (pjsua-style); wrapper re-chunks to 10 ms
-    cleaned = bytearray()
-    for i in range(0, max(len(near), len(far_pcm)), CH):
-        fchunk = far_pcm[i:i + CH]
-        if fchunk:
-            proc.feed_far(fchunk)
-        nchunk = near[i:i + CH]
-        if nchunk:
-            cleaned += proc.process_near(nchunk)
-    return bytes(cleaned)
+def rms(pcm, a, b):
+    xs = struct.unpack("<%dh" % (len(pcm) // 2), pcm)[a:b]
+    return math.sqrt(sum(v * v for v in xs) / len(xs)) if xs else 0.0
 
 
 def main():
-    user_wav = os.path.join(FIX, "long_sentence.wav")
-    expected = open(os.path.join(FIX, "long_sentence.txt")).read()
-    # our spoken line that echoes back (different words, so contamination is visible)
-    tts_wav = va._tts_to_wav("Okay, here is the current status of your deployment pipeline.")
-    delay_ms = 150.0
-    near_wav, far = mix_echo(user_wav, tts_wav, tempfile.mktemp(suffix=".wav"),
-                             delay_ms=delay_ms, atten=0.6, noise_amp=250, user_start_ms=0.0)
-    with wave.open(near_wav, "rb") as w:
-        near_pcm = w.readframes(w.getnframes())
+    user = _read(os.path.join(FIX, "long_sentence.wav"))
+    tts_wav = va._tts_to_wav(
+        "Okay, here is the current status of your deployment pipeline running right now.")
+    tts = _read(tts_wav)
+    delay = 150
+    d = int(SR * delay / 1000)
+    # near = our echo (delayed/attenuated TTS) everywhere + the user ONLY in the 2nd half,
+    # so we have a clean echo-only window (barge must NOT fire) and a user window (must fire)
+    user_start = int(3.0 * SR)
+    n = max(len(tts) + d, user_start + len(user)) + SR
+    near = [0] * n
+    for i, s in enumerate(tts):
+        near[i + d] += int(0.7 * s)
+    for i, s in enumerate(user):
+        if user_start + i < n:
+            near[user_start + i] += s
+    near_pcm = struct.pack("<%dh" % n, *[max(-32767, min(32767, x)) for x in near])
+    far = struct.pack("<%dh" % len(tts), *[max(-32767, min(32767, s)) for s in tts])
 
-    raw = _transcribe_pcm(near_pcm)
-    cleaned_pcm = _aec_clean(near_wav, far, delay_ms)
-    cleaned = _transcribe_pcm(cleaned_pcm)
+    proc = aec.AecProcessor(delay_ms=delay)
+    CH = 640
+    cleaned = bytearray()
+    for i in range(0, max(len(near_pcm), len(far)), CH):
+        if far[i:i + CH]:
+            proc.feed_far(far[i:i + CH])
+        if near_pcm[i:i + CH]:
+            cleaned += proc.process_near(near_pcm[i:i + CH])
+    cleaned = bytes(cleaned)
 
-    raw_ov, clean_ov = _overlap(expected, raw), _overlap(expected, cleaned)
-    print(f"USER (expected): {expected!r}")
-    print(f"OUR ECHO       : 'Okay, here is the current status of your deployment pipeline.'")
-    print(f"\nRAW near-end   : {raw!r}\n  user-word overlap: {raw_ov:.0%}")
-    print(f"\nAEC cleaned    : {cleaned!r}\n  user-word overlap: {clean_ov:.0%}")
-    improved = clean_ov - raw_ov
-    print(f"\nAEC improved user-word recovery by {improved:+.0%}")
-    va._rm(near_wav)
+    eo = (int(0.6 * SR), int(2.6 * SR))      # echo-only window
+    uw = (int(3.5 * SR), int(5.5 * SR))      # user-present window
+    raw_echo, cl_echo = rms(near_pcm, *eo), rms(cleaned, *eo)
+    raw_user, cl_user = rms(near_pcm, *uw), rms(cleaned, *uw)
+    red = 20 * math.log10((raw_echo + 1) / (cl_echo + 1))
+    user_keep = cl_user / (raw_user + 1)
     va._rm(tts_wav)
-    ok = clean_ov >= 0.7 and clean_ov > raw_ov
-    print("RESULT:", "PASS — AEC recovers the user under echo" if ok else "INVESTIGATE")
+
+    print(f"ECHO-ONLY  raw {raw_echo:6.0f} -> cleaned {cl_echo:6.0f}   reduction {red:5.1f} dB")
+    print(f"USER       raw {raw_user:6.0f} -> cleaned {cl_user:6.0f}   preserved {user_keep:.0%}")
+    print(f"gating: cleaned echo floor {cl_echo:.0f}  vs  user {cl_user:.0f}  "
+          f"-> {'SEPARABLE' if cl_user > cl_echo * 3 else 'too close'}")
+
+    ok = red >= 15 and user_keep >= 0.6 and cl_user > cl_echo * 3
+    print("RESULT:", "PASS — echo energy killed, user preserved, barge gateable" if ok
+          else "FAIL")
     return 0 if ok else 1
 
 
