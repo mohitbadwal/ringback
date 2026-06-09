@@ -10,8 +10,10 @@ Run env (set by the launcher):
 """
 from __future__ import annotations
 
+import atexit
 import math
 import os
+import signal
 import struct
 import subprocess
 import sys
@@ -28,7 +30,7 @@ import pjsua2 as pj
 _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
-from platform_compat import IS_MAC, detached_popen_kwargs, synthesize_to_wav  # noqa: E402
+from platform_compat import IS_MAC, IS_WIN, detached_popen_kwargs, synthesize_to_wav  # noqa: E402
 
 # ---- config (all via env; see voice.env.example) ------------------------------
 # Your SIP identity/credentials come from the environment (the launcher sources
@@ -219,34 +221,90 @@ def _wsrv_health() -> bool:
         return False      # connection refused / timeout -> down
 
 
-def _wsrv_reaper_loop():
+def _wsrv_kill_strays():
+    """Kill any whisper-server already on our port that ISN'T ours — i.e. an orphan left by
+    a previous (dead) MCP process. POSIX best-effort; called before re-spawning."""
+    if IS_WIN:
+        return
+    try:
+        out = subprocess.run(["pgrep", "-f", f"whisper-server.*--port {WHISPER_SERVER_PORT}"],
+                             capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return
+    keep = {os.getpid(), _wsrv_proc.pid if _wsrv_proc is not None else -1}
+    for tok in out.split():
+        try:
+            pid = int(tok)
+        except ValueError:
+            continue
+        if pid not in keep:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except Exception:
+                pass
+
+
+def _wsrv_terminate():
+    """Stop the whisper-server (and its watchdog) — the whole process group on POSIX so
+    nothing is left behind. Caller holds _wsrv_lock (or it's shutdown). Lock-free itself."""
     global _wsrv_proc
+    p, _wsrv_proc = _wsrv_proc, None
+    if p is None:
+        return
+    try:
+        if IS_WIN:
+            p.terminate()
+        else:
+            os.killpg(os.getpgid(p.pid), signal.SIGTERM)
+    except Exception:
+        try:
+            p.terminate()
+        except Exception:
+            pass
+
+
+def _wsrv_reaper_loop():
     while True:
         time.sleep(20)
         with _wsrv_lock:
             if _wsrv_proc is None:
                 return
             if time.time() - _wsrv_last_use > WHISPER_SERVER_IDLE_SEC:
-                try:
-                    _wsrv_proc.terminate()
-                except Exception:
-                    pass
-                _wsrv_proc = None
-                return    # idle too long -> freed; a future call re-spawns + re-arms
+                _wsrv_terminate()   # idle too long -> free it (kills the whole group)
+                return              # a future call re-spawns + re-arms
 
 
 def _wsrv_spawn():
-    """Start the server if it isn't up (non-blocking) and arm the idle reaper."""
+    """Start the server if it isn't up (non-blocking) and arm the idle reaper.
+
+    The server's lifetime is tied to THIS process: on POSIX it runs under a tiny `sh`
+    watchdog that kills it the moment our PID is gone, so a dead/killed MCP can NEVER leave
+    an orphaned whisper-server. (The previous design detached the server and kept the reaper
+    only in the parent — when the parent died, the reaper died with it and the server ran
+    forever; observed as a 2.75-day-old orphan with PPID=1.)"""
     global _wsrv_proc, _wsrv_reaper, _wsrv_last_use
     with _wsrv_lock:
         if _wsrv_health() or (_wsrv_proc is not None and _wsrv_proc.poll() is None):
             return
+        _wsrv_kill_strays()   # clear any orphan from a previous dead MCP before re-spawning
         try:
-            _wsrv_proc = subprocess.Popen(
-                [WHISPER_SERVER_BIN, "-m", WHISPER_SERVER_MODEL,
-                 "--host", WHISPER_SERVER_HOST, "--port", str(WHISPER_SERVER_PORT)],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                **detached_popen_kwargs())
+            if IS_WIN:
+                _wsrv_proc = subprocess.Popen(
+                    [WHISPER_SERVER_BIN, "-m", WHISPER_SERVER_MODEL,
+                     "--host", WHISPER_SERVER_HOST, "--port", str(WHISPER_SERVER_PORT)],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    **detached_popen_kwargs())
+            else:
+                # sh watchdog: run the server, then exit (killing it) once our PID is gone.
+                # Own session so the reaper / atexit can killpg the whole group.
+                watchdog = ('"$1" -m "$2" --host "$3" --port "$4" & srv=$!; '
+                            f'while kill -0 {os.getpid()} 2>/dev/null; do sleep 5; done; '
+                            'kill "$srv" 2>/dev/null')
+                _wsrv_proc = subprocess.Popen(
+                    ["/bin/sh", "-c", watchdog, "sh", WHISPER_SERVER_BIN, WHISPER_SERVER_MODEL,
+                     WHISPER_SERVER_HOST, str(WHISPER_SERVER_PORT)],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    start_new_session=True)
             _wsrv_last_use = time.time()
         except FileNotFoundError:
             _wsrv_proc = None
@@ -254,6 +312,11 @@ def _wsrv_spawn():
         if _wsrv_reaper is None or not _wsrv_reaper.is_alive():
             _wsrv_reaper = threading.Thread(target=_wsrv_reaper_loop, daemon=True)
             _wsrv_reaper.start()
+
+
+# On clean interpreter exit, take the whisper-server down too (belt-and-suspenders alongside
+# the sh watchdog, which also covers SIGKILL where atexit can't run).
+atexit.register(_wsrv_terminate)
 
 
 def _wsrv_warm():
