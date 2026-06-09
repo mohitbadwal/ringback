@@ -101,7 +101,8 @@ ioreg -c IOHIDSystem | awk '/HIDIdleTime/ {print int($NF/1000000000); exit}'
 # Windows:        GetLastInputInfo via Win32 (see platform_compat._idle_windows)
 ```
 On Wayland/headless where idle can't be read, set `RINGBACK_PRESENCE=absent` to allow
-escalation (or `present` to suppress it).
+escalation (or `present` to suppress it). See **"Presence detection across platforms"** below
+for which environments can read real idle and which need the override.
 - **ACTIVE** if idle `< 120s` → you're at the keyboard. Do NOT alert or call. Post the status in **chat only** (that's the right channel when you're looking at the screen), set `rung` appropriately, and finish. If you'd previously `warned`/`alerted`, note "you're back — handling in chat" and reset `rung` to `monitoring` (de-escalated).
 - **AWAY** if idle `>= 300s` → escalation allowed; go to step 4.
 - **In-between (120–300s)** → treat as borderline-present: post chat status, hold escalation one more tick, leave `rung` unchanged.
@@ -161,6 +162,42 @@ The user "acknowledging" = they touch the laptop (idle drops below 120s) or send
 
 To stop: delete `~/.claude/watchdog/state.json` (or set `rung: "resolved"`). The very next tick reads the missing/resolved state in step 1 and **stops without rescheduling**, so the self-perpetuating loop ends on its own — there is no separate `/loop` to cancel. The user can also just say "stop the watchdog".
 
+## Presence detection across platforms
+
+Presence answers "is the human at the keyboard?" — it only means something on the machine
+that has the user's **desktop session**, and it is read **wherever this skill's idle probe
+runs** (step 3), which may differ from where the ringback voice engine runs.
+`platform_compat.hid_idle_seconds()` returns seconds since the last input (large = away).
+
+| Where the idle probe runs | How idle is read | Works? |
+|---|---|---|
+| macOS | `ioreg` → `HIDIdleTime` | ✅ proven |
+| Native Windows (Claude on the host) | Win32 `GetLastInputInfo` (ctypes) | ✅ — engine may still live in WSL2/Docker; only the probe needs the host |
+| Native Linux desktop (X11) | `xprintidle` | ✅ |
+| Native Linux desktop (GNOME) | `Mutter.IdleMonitor` over D-Bus | ✅ on GNOME |
+| Inside WSL2 / Docker / headless server | no desktop session exists | ❌ → returns `0.0` = "present" |
+| Linux Wayland (non-GNOME) | no standard idle API | ❌ → returns `0.0` = "present" |
+
+**Fail-safe default:** when idle can't be determined the function returns `0.0` ("present"),
+so the watchdog errs toward **not** interrupting — it never escalates against an unknown
+state (the failure mode is "won't call," never "spam calls").
+
+**`RINGBACK_PRESENCE` override** (set in the agent/skill environment) forces the answer where
+auto-detection can't work:
+- `RINGBACK_PRESENCE=absent` → always "away" → escalation always allowed. Use on a
+  **headless server / container**: there's no local keyboard, so you always want the phone
+  path available.
+- `RINGBACK_PRESENCE=present` → always "present" → chat-only, never call.
+
+**Windows note:** the voice engine runs in WSL2/Docker, but run the step-3 idle probe on the
+**Windows host** (native `python` → `GetLastInputInfo`) to get real presence. An in-WSL or
+in-container probe always reads "present", so the watchdog won't auto-call — set
+`RINGBACK_PRESENCE` explicitly in that case.
+
+**Status (honest):** macOS is proven. The native-Windows and native-Linux-desktop paths use
+the correct OS APIs but have not yet been verified on real Windows / Linux-desktop hardware.
+The WSL2/Docker/headless limitation is inherent (no desktop = no idle), not a bug.
+
 ## Notes / guardrails
 
 - Arming auto-starts the loop via `ScheduleWakeup` — the user never has to run `/loop` manually. The loop sustains itself because every non-terminal tick reschedules.
@@ -168,5 +205,5 @@ To stop: delete `~/.claude/watchdog/state.json` (or set `rung: "resolved"`). The
 - Never call or alert on the **arming** invocation — arming only sets state and schedules the first tick.
 - One rung per tick — no skipping straight to a call from `monitoring`.
 - Respect the ~30s Claude-side tool timeout (Claude Desktop); keep `converse`/`listen` turns short.
-- Idle detection reflects **this Mac only**. If the user is away from this machine but reachable, the phone alert/call is exactly the right fallback — which is the point.
+- Idle detection reflects **only the machine the probe runs on** (see "Presence detection across platforms"). If the user is away from that machine but reachable, the phone alert/call is exactly the right fallback — which is the point.
 - Don't spam chat on NOT-READY ticks; only post when state changes or on escalation.
