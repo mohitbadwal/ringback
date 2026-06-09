@@ -579,7 +579,10 @@ class CallSession:
         self.acc = pj.Account()
         self.acc.create(acfg)
 
-    def place_call(self, answer_timeout: float = 25.0) -> bool:
+    def place_call(self, answer_timeout: float = 25.0, callee: str | None = None) -> bool:
+        # `callee` lets a caller dial a specific SIP address (the remote/multi-user server
+        # passes each user's Linphone address); defaults to env SIP_CALLEE (local self-call),
+        # so the local stdio MCP is unchanged.
         import gc
         self._reg()
         self.connected = False
@@ -590,7 +593,7 @@ class CallSession:
             self.call = None
             gc.collect()
         self.call = _Call(self.acc, self)
-        self.call.makeCall(SIP_CALLEE, pj.CallOpParam(True))
+        self.call.makeCall(callee or SIP_CALLEE, pj.CallOpParam(True))
         end = time.time() + answer_timeout
         while time.time() < end:
             time.sleep(0.1)
