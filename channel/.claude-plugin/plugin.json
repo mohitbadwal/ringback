@@ -1,5 +1,5 @@
 {
-  "name": "ringback",
+  "name": "ringback-channel",
   "description": "Reach an away user by phone from a live Claude Code session: the agent (or the Stop hook) phones you, you answer by voice, and the idle session wakes and acts on your spoken reply.",
   "version": "0.1.0",
   "author": { "name": "Mohit Badwal" },

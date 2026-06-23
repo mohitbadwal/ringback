@@ -1,15 +1,20 @@
 {
-  "name": "ringback-local",
+  "name": "ringback",
   "owner": { "name": "Mohit Badwal" },
   "metadata": {
-    "description": "Local marketplace for the ringback phone channel (run it in-place from this repo).",
+    "description": "ringback — let your AI agent call your phone (two-way voice) and send tiered alerts, over free self-hosted SIP.",
     "version": "0.1.0"
   },
   "plugins": [
     {
       "name": "ringback",
+      "source": "./plugin",
+      "description": "Your AI agent calls your phone for a two-way voice conversation plus tiered alerts (runs the engine in Docker). Presence-aware: it only calls when you are away from the keyboard."
+    },
+    {
+      "name": "ringback-channel",
       "source": "./channel",
-      "description": "Phone channel — the agent reaches an away user by voice and the session wakes on their reply."
+      "description": "Experimental: a phone channel that wakes an idle Claude Code session on your spoken reply."
     }
   ]
 }

@@ -41,6 +41,19 @@ The LLM calls `call_start` once, then `converse(...)` for each turn. Plain alert
 
 ---
 
+## Install as a Claude Code plugin (Docker — one command)
+
+If you have **Docker** and a free [Linphone](https://subscribe.linphone.org) account, this is the fastest path — no local build:
+
+```text
+/plugin marketplace add mohitbadwal/ringback
+/plugin install ringback@ringback
+```
+
+Claude Code prompts for your SIP details (and optional alert backends), stores secrets in your OS keychain, and registers both `ringback-voice` and `ringback-alert` plus the watchdog skill. The engine runs in the prebuilt image (pulled on first call). See [plugin/README.md](plugin/README.md).
+
+> Prefer no Docker, or want the native build? Use the paste-prompt below or the manual steps.
+
 ## Let Claude Code install it for you
 
 🤖 Easiest path: **copy the prompt below and paste it into [Claude Code](https://claude.com/claude-code)** — it'll clone, build, configure, and register everything, asking you only for what it needs (a free SIP account + your phone to answer a test call).
