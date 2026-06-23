@@ -46,20 +46,21 @@ require VOICE_SIP_USER
 require VOICE_SIP_PASS
 
 for v in VOICE_SIP_ID VOICE_SIP_USER VOICE_SIP_PASS VOICE_SIP_CALLEE VOICE_DISPLAY_NAME \
-         VOICE_SIP_PROXY VOICE_HALF_DUPLEX VOICE_DEBUG; do
+         VOICE_SIP_PROXY VOICE_STUN VOICE_HALF_DUPLEX VOICE_DEBUG; do
   add_env "$v"
 done
 
-# RTP media networking differs by platform (see docs/SETUP_DOCKER.md):
+# RTP media networking (see docs/SETUP_DOCKER.md):
 #   - Linux / WSL2 -> host networking; pjsua's RTP ports are directly reachable.
-#   - Docker Desktop (macOS / Windows) -> engine runs in a Linux VM, so host networking does
-#     not expose ports the same way; pin the RTP port (engine honors VOICE_RTP_PORT) and
-#     publish it as UDP instead.
+#   - Docker Desktop (macOS / Windows) -> the engine runs in a NAT'd Linux VM where neither
+#     host networking nor port-publishing delivers the return RTP. Plain bridge + STUN is what
+#     works: STUN (VOICE_STUN, set by the plugin) makes pjsua advertise its PUBLIC address so
+#     the remote media server can route audio back. Verified two-way + barge-in on Apple Silicon.
 NETARGS=()
 case "$(uname -s)" in
   Linux) NETARGS=(--network host) ;;
-  *)     NETARGS=(-e VOICE_RTP_PORT=4000 -p 4000:4000/udp -p 4001:4001/udp) ;;
+  *)     NETARGS=() ;;   # plain bridge; STUN handles NAT traversal
 esac
 
 # ${arr[@]+...} guards against an empty array under `set -u` on bash 3.2 (macOS default).
-exec docker run --rm -i "${NETARGS[@]}" ${ENVARGS[@]+"${ENVARGS[@]}"} "$IMG"
+exec docker run --rm -i ${NETARGS[@]+"${NETARGS[@]}"} ${ENVARGS[@]+"${ENVARGS[@]}"} "$IMG"

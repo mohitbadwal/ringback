@@ -113,6 +113,29 @@ WHISPER_SERVER_HOST = os.environ.get("WHISPER_SERVER_HOST", "127.0.0.1")
 WHISPER_SERVER_PORT = int(os.environ.get("WHISPER_SERVER_PORT", "8642"))
 WHISPER_SERVER_IDLE_SEC = float(os.environ.get("WHISPER_SERVER_IDLE_SEC", "300"))  # GC after 5 min idle
 
+# ---- silence diagnostics --------------------------------------------------------------
+# Every listen turn ends with ONE summary line on stderr (the stdio MCP's stderr lands in
+# the client's MCP log), so a [SILENCE] result is attributable after the fact:
+#   wav=44B            -> no RTP audio ever arrived (media/network problem, not the user)
+#   rms_max < thresh   -> audio arrived but never crossed the speech-energy threshold
+#   voiced>0 text=0w   -> speech energy was seen but whisper produced no usable words
+# VOICE_DEBUG=1 adds the chatty detail (each transcript the hallucination filter discards).
+# VOICE_DEBUG_KEEP_WAV=1 keeps the recorded audio of a silent turn under VOICE_DEBUG_WAV_DIR
+# so you can listen to what actually arrived.
+VOICE_DEBUG = os.environ.get("VOICE_DEBUG", "0").strip().lower() in ("1", "true", "yes")
+DEBUG_KEEP_WAV = os.environ.get("VOICE_DEBUG_KEEP_WAV", "0").strip().lower() in ("1", "true", "yes")
+DEBUG_WAV_DIR = os.environ.get("VOICE_DEBUG_WAV_DIR",
+                               os.path.join(tempfile.gettempdir(), "ringback-debug"))
+
+
+def _dlog(msg: str) -> None:
+    print(f"[ringback] {msg}", file=sys.stderr, flush=True)
+
+
+def _vlog(msg: str) -> None:
+    if VOICE_DEBUG:
+        _dlog(msg)
+
 
 def _eff_threshold(base: float, noise_floor: float, factor: float = NOISE_FACTOR) -> float:
     """Speech threshold = base, raised to clear measured ambient noise, then capped.
@@ -189,8 +212,10 @@ def _clean_text(text: str) -> str:
     if not text:
         return ""
     if text.startswith(("[", "(")) and text.endswith(("]", ")")):
+        _vlog(f"transcript filtered as non-speech annotation: {text!r}")
         return ""
     if text.strip(" .,!?-").lower() in _HALLUCINATIONS:
+        _vlog(f"transcript filtered as silence-hallucination: {text!r}")
         return ""
     return text
 
@@ -198,6 +223,8 @@ def _clean_text(text: str) -> str:
 def _transcribe(wav: str) -> str:
     out = subprocess.run([WHISPER_BIN, "-m", WHISPER_MODEL, "-f", wav, "-nt", "-t", "8"],
                          capture_output=True, text=True)
+    if out.returncode != 0:
+        _dlog(f"whisper-cli failed (rc={out.returncode}): {out.stderr.strip()[-200:]}")
     return _clean_text(out.stdout)
 
 
@@ -209,6 +236,7 @@ _wsrv_proc = None
 _wsrv_last_use = 0.0
 _wsrv_lock = threading.Lock()
 _wsrv_reaper = None
+_wsrv_down_logged = False   # log the CLI fallback once per outage, not on every 0.3s poll
 
 
 def _wsrv_health() -> bool:
@@ -339,8 +367,11 @@ def _wsrv_ready(wait_sec: float = 12.0) -> bool:
 
 def _transcribe_stream(wav: str) -> str:
     """Fast transcription via the persistent whisper-server; whisper-cli fallback."""
-    global _wsrv_last_use
+    global _wsrv_last_use, _wsrv_down_logged
     if not _wsrv_ready():
+        if not _wsrv_down_logged:
+            _dlog("whisper-server not ready -> falling back to whisper-cli (slower)")
+            _wsrv_down_logged = True
         return _transcribe(wav)
     try:
         with open(wav, "rb") as f:
@@ -357,20 +388,29 @@ def _transcribe_stream(wav: str) -> str:
         with urllib.request.urlopen(req, timeout=6) as r:
             text = r.read().decode("utf-8", "ignore")
         _wsrv_last_use = time.time()
+        _wsrv_down_logged = False
         return _clean_text(text)
-    except Exception:
+    except Exception as e:
+        if not _wsrv_down_logged:
+            _dlog(f"whisper-server inference failed ({type(e).__name__}: {str(e)[:120]}) "
+                  "-> falling back to whisper-cli")
+            _wsrv_down_logged = True
         return _transcribe(wav)
 
 
 def _capture_turn(snapshot_fn, is_disconnected, max_sec: float = 15.0,
                   start_timeout: float = START_TIMEOUT, end_silence: float = END_SILENCE,
-                  energy_fn=None, end_rms: float = LISTEN_END_RMS) -> str:
+                  energy_fn=None, end_rms: float = LISTEN_END_RMS,
+                  stats: dict | None = None) -> str:
     """The streaming capture turn-loop, with NO pjsua2/SIP dependency so it can be
     unit-tested with a file-fed audio source (see tests/test_capture.py).
 
       snapshot_fn()    -> valid-header WAV path of audio captured so far, or "".
       energy_fn()      -> tail RMS of the near-end (the robust "still talking?" signal).
       is_disconnected()-> True if the call dropped (bail at once; returns None).
+      stats            -> optional dict, filled with the turn's diagnostics (exit reason,
+                          rms_max vs threshold, voiced/total polls, ...) so the caller can
+                          log ONE line that says WHY a turn came back silent.
 
     The user counts as VOICED on a given poll if the near-end energy is above `end_rms` OR
     a new word appeared. End-of-turn is then:
@@ -385,17 +425,33 @@ def _capture_turn(snapshot_fn, is_disconnected, max_sec: float = 15.0,
     max_words = 0
     last_voice = None         # elapsed time we last saw speech energy or a new word
     last_check = 0.0
+    polls = voiced_polls = snaps = 0
+    rms_max = 0.0
+    exit_reason = "max_sec"
+
+    def _fill():
+        if stats is not None:
+            stats.update(exit=exit_reason, dur=time.time() - start, rms_max=rms_max,
+                         thresh=end_rms, polls=polls, voiced_polls=voiced_polls,
+                         snaps=snaps, words=max_words)
+
     while time.time() - start < max_sec:
         time.sleep(0.1)
         if is_disconnected():
+            exit_reason = "hangup"
+            _fill()
             return None
         el = time.time() - start
-        voiced = energy_fn is not None and energy_fn() > end_rms      # checked every poll
+        polls += 1
+        rms = energy_fn() if energy_fn is not None else 0.0           # checked every poll
+        rms_max = max(rms_max, rms)
+        voiced = energy_fn is not None and rms > end_rms
         if el >= 0.5 and (el - last_check) >= 0.3:                    # transcribe ~3x/sec
             last_check = el
             snap = snapshot_fn()
             t = _transcribe_stream(snap) if snap else ""   # already hallucination-filtered
             if snap:
+                snaps += 1
                 _rm(snap)
             if t:
                 text = t
@@ -404,13 +460,31 @@ def _capture_turn(snapshot_fn, is_disconnected, max_sec: float = 15.0,
                     max_words = wc
                     voiced = True
         if voiced:
+            voiced_polls += 1
             last_voice = el
         if last_voice is None:
             if el >= start_timeout:
+                exit_reason = "start_timeout"
                 break                         # never started speaking -> ""
         elif (el - last_voice) >= end_silence:
+            exit_reason = "end_silence"
             break                             # voice stopped for end_silence -> end turn
+    _fill()
     return text
+
+
+def _listen_summary(st: dict, wav_bytes: int, result: str, hangup: bool = False) -> None:
+    """ONE attributable stderr line per listen turn. The fields disambiguate every cause of
+    a silent turn: wav=44B -> no RTP audio ever arrived; rms_max < thresh -> audio arrived
+    but stayed under the speech threshold; voiced>0 with text=0w -> speech energy was seen
+    but whisper produced no usable words (see also the VOICE_DEBUG filter logs)."""
+    outcome = ("[CALL ENDED]" if (hangup or st.get("exit") == "hangup")
+               else ("ok" if result else "[SILENCE]"))
+    _dlog("listen: exit=%s dur=%.1fs rms_max=%.0f thresh=%.0f voiced=%d/%d snaps=%d "
+          "wav=%dB text=%dw -> %s"
+          % (st.get("exit", "?"), st.get("dur", 0.0), st.get("rms_max", 0.0),
+             st.get("thresh", 0.0), st.get("voiced_polls", 0), st.get("polls", 0),
+             st.get("snaps", 0), wav_bytes, len(result.split()), outcome))
 
 
 class _BargeState:
@@ -540,6 +614,15 @@ class CallSession:
         _logfile = os.environ.get("VOICE_LOG_FILE", "")
         if _logfile:
             cfg.logConfig.filename = _logfile
+        # STUN: discover our PUBLIC RTP address so the SDP advertises something the remote
+        # media server can actually return audio to. Without it, a client behind NAT (notably
+        # inside Docker — bridge or Docker Desktop) advertises a private address and gets
+        # ONE-WAY audio (it hears the user fine, the user's reply never arrives). Off unless
+        # VOICE_STUN is set; the Docker plugin sets it (the local/native path doesn't need it).
+        _stun = os.environ.get("VOICE_STUN", "").strip()
+        if _stun:
+            cfg.uaConfig.stunServer.append(_stun)
+            print(f"[ringback] STUN enabled: {_stun}", file=sys.stderr, flush=True)
         self.ep.libInit(cfg)
 
         self.ep.transportCreate(pj.PJSIP_TRANSPORT_UDP, pj.TransportConfig())
@@ -600,6 +683,11 @@ class CallSession:
             if self.connected and self.aud is not None:
                 time.sleep(0.4)   # let media settle
                 self.noise_floor = self._measure_rms(0.6)   # calibrate to ambient noise
+                _dlog("call connected: noise_floor=%.0f -> listen_thresh=%.0f "
+                      "barge_thresh=%.0f end_rms=%.0f"
+                      % (self.noise_floor,
+                         _eff_threshold(LISTEN_RMS_BASE, self.noise_floor, LISTEN_NOISE_FACTOR),
+                         _eff_threshold(BARGE_RMS_BASE, self.noise_floor), LISTEN_END_RMS))
                 _wsrv_warm()   # lazily start the whisper-server now so it's ready to capture
                 return True
             if self.disconnected:
@@ -638,6 +726,8 @@ class CallSession:
         hang-up (caller surfaces [SILENCE] / [CALL ENDED])."""
         self._reg()
         if not (self.connected and self.aud):
+            _dlog("listen: no active media (connected=%s, disconnected=%s) -> [SILENCE]"
+                  % (self.connected, self.disconnected))
             return ""
         rec_wav = tempfile.mktemp(suffix=".wav")
         rec = pj.AudioMediaRecorder()
@@ -645,23 +735,40 @@ class CallSession:
         self.aud.startTransmit(rec)
         # stream-capture via the pure, file-fed turn-loop (same code the tests exercise);
         # energy_fn = near-end tail RMS is the robust "still talking?" signal for end-of-turn
+        st: dict = {}
         text = _capture_turn(lambda: _wav_snapshot(rec_wav), lambda: self.disconnected,
                              max_sec=max_sec, start_timeout=start_timeout, end_silence=end_silence,
-                             energy_fn=lambda: _tail_rms(rec_wav, 0.3))
+                             energy_fn=lambda: _tail_rms(rec_wav, 0.3), stats=st)
         try:
             self.aud.stopTransmit(rec)
         except Exception:
             pass
         del rec
+        try:
+            wav_bytes = os.path.getsize(rec_wav)   # 44B = header only -> NO RTP ever arrived
+        except OSError:
+            wav_bytes = 0
         if text is None or self.disconnected:    # hang-up mid-turn
+            _listen_summary(st, wav_bytes, "", hangup=True)
             _rm(rec_wav)
             return ""
         snap = _wav_snapshot(rec_wav)            # full audio with a correct header
         final = _transcribe_stream(snap) if snap else ""
         if snap:
             _rm(snap)
-        _rm(rec_wav)
-        return final or text
+        result = final or text
+        _listen_summary(st, wav_bytes, result)
+        if not result and DEBUG_KEEP_WAV:        # keep the audio of a silent turn for replay
+            try:
+                os.makedirs(DEBUG_WAV_DIR, exist_ok=True)
+                kept = os.path.join(DEBUG_WAV_DIR, "turn-%d.wav" % int(time.time()))
+                os.replace(rec_wav, kept)
+                _dlog(f"listen: silent-turn audio kept at {kept}")
+            except OSError:
+                _rm(rec_wav)
+        else:
+            _rm(rec_wav)
+        return result
 
     def speak_interruptible(self, text: str, listen_after: bool = True,
                             silence_sec: float = 1.0, max_wait: float = 15.0,
