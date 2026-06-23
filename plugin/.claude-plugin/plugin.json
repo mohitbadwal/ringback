@@ -1,0 +1,74 @@
+{
+  "name": "ringback",
+  "displayName": "ringback — your agent calls your phone",
+  "version": "0.1.0",
+  "description": "Two-way voice phone calls plus tiered alerts for your AI agent, over free self-hosted SIP. The agent rings your phone and talks to you when it needs a decision, and it is presence-aware so it only calls when you are away from the keyboard. Runs the engine in Docker, so there is no local build.",
+  "author": { "name": "Mohit Badwal" },
+  "homepage": "https://github.com/mohitbadwal/ringback",
+  "repository": "https://github.com/mohitbadwal/ringback",
+  "license": "Apache-2.0",
+  "keywords": [
+    "mcp", "voice", "phone", "sip", "claude", "human-in-the-loop",
+    "notifications", "whisper", "tts", "agent", "docker"
+  ],
+  "userConfig": {
+    "sip_id": {
+      "type": "string",
+      "title": "Your SIP address",
+      "description": "Your Linphone SIP address, e.g. sip:you@sip.linphone.org. This is also the phone the agent calls unless you set a different number below.",
+      "required": true
+    },
+    "sip_user": {
+      "type": "string",
+      "title": "SIP username",
+      "description": "Your Linphone username (the part before the @).",
+      "required": true
+    },
+    "sip_pass": {
+      "type": "string",
+      "title": "SIP password",
+      "description": "Your Linphone account password. Stored in your OS keychain, never in a file.",
+      "sensitive": true,
+      "required": true
+    },
+    "sip_callee": {
+      "type": "string",
+      "title": "Address to call (optional)",
+      "description": "SIP address the agent dials. Leave blank to call your own SIP address above."
+    },
+    "display_name": {
+      "type": "string",
+      "title": "Caller-ID name (optional)",
+      "description": "Name shown on your phone when the agent calls, e.g. My Claude."
+    },
+    "alert_channel": {
+      "type": "string",
+      "title": "Alert channel (optional)",
+      "description": "Push backend for ringback-alert: ntfy, pushover, or both. Leave the default if you only want voice calls.",
+      "default": "ntfy"
+    },
+    "ntfy_url": {
+      "type": "string",
+      "title": "ntfy topic URL (optional)",
+      "description": "Full ntfy URL with a long, random topic, e.g. https://ntfy.sh/your-random-topic. Anyone who knows the topic can read it, so make it hard to guess."
+    },
+    "ntfy_token": {
+      "type": "string",
+      "title": "ntfy token (optional)",
+      "description": "Only needed for a self-hosted ntfy with auth. Leave blank for public ntfy.sh.",
+      "sensitive": true
+    },
+    "pushover_token": {
+      "type": "string",
+      "title": "Pushover app token (optional)",
+      "description": "App token from pushover.net (gives true iOS Critical Alerts).",
+      "sensitive": true
+    },
+    "pushover_user": {
+      "type": "string",
+      "title": "Pushover user key (optional)",
+      "description": "Your Pushover user key.",
+      "sensitive": true
+    }
+  }
+}
