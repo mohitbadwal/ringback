@@ -2,17 +2,20 @@
   "mcpServers": {
     "ringback-voice": {
       "command": "${CLAUDE_PLUGIN_ROOT}/bin/run-voice-docker.sh",
+      "startupTimeout": 600000,
       "env": {
         "VOICE_SIP_ID": "${user_config.sip_id}",
         "VOICE_SIP_USER": "${user_config.sip_user}",
         "VOICE_SIP_PASS": "${user_config.sip_pass}",
         "VOICE_SIP_CALLEE": "${user_config.sip_callee}",
         "VOICE_DISPLAY_NAME": "${user_config.display_name}",
+        "VOICE_STUN": "${user_config.stun_server}",
         "RINGBACK_IMAGE": "ghcr.io/mohitbadwal/ringback:latest"
       }
     },
     "ringback-alert": {
       "command": "${CLAUDE_PLUGIN_ROOT}/bin/run-alert-docker.sh",
+      "startupTimeout": 600000,
       "env": {
         "ALERT_CHANNEL": "${user_config.alert_channel}",
         "NTFY_URL": "${user_config.ntfy_url}",

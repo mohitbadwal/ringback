@@ -49,9 +49,13 @@ RUN curl -fsSL "https://github.com/pjsip/pjproject/archive/refs/tags/${PJ_VER}.t
     && ldconfig
 
 # --- whisper.cpp (whisper-cli + whisper-server) -------------------------------
+# GGML_NATIVE=OFF is REQUIRED: the default (ON) bakes in -march=native CPU instructions from
+# the BUILD machine (e.g. a GitHub Ampere ARM runner). Those crash with SIGILL on a different
+# CPU at runtime — e.g. Apple Silicon under Docker Desktop — so whisper died on every call.
+# OFF builds a portable baseline binary that runs on any amd64 / arm64.
 RUN git clone --depth 1 https://github.com/ggerganov/whisper.cpp /opt/whisper.cpp \
     && cmake -S /opt/whisper.cpp -B /opt/whisper.cpp/build \
-        -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON >/dev/null \
+        -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DGGML_NATIVE=OFF >/dev/null \
     && cmake --build /opt/whisper.cpp/build -j --target whisper-cli whisper-server \
     && cp /opt/whisper.cpp/build/bin/whisper-cli /opt/whisper.cpp/build/bin/whisper-server \
           /usr/local/bin/ \

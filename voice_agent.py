@@ -614,6 +614,15 @@ class CallSession:
         _logfile = os.environ.get("VOICE_LOG_FILE", "")
         if _logfile:
             cfg.logConfig.filename = _logfile
+        # STUN: discover our PUBLIC RTP address so the SDP advertises something the remote
+        # media server can actually return audio to. Without it, a client behind NAT (notably
+        # inside Docker — bridge or Docker Desktop) advertises a private address and gets
+        # ONE-WAY audio (it hears the user fine, the user's reply never arrives). Off unless
+        # VOICE_STUN is set; the Docker plugin sets it (the local/native path doesn't need it).
+        _stun = os.environ.get("VOICE_STUN", "").strip()
+        if _stun:
+            cfg.uaConfig.stunServer.append(_stun)
+            print(f"[ringback] STUN enabled: {_stun}", file=sys.stderr, flush=True)
         self.ep.libInit(cfg)
 
         self.ep.transportCreate(pj.PJSIP_TRANSPORT_UDP, pj.TransportConfig())

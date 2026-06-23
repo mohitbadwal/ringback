@@ -55,24 +55,24 @@ docker run -i --rm --network host --env-file alert.docker.env ringback python se
 SIP signaling is outbound TLS to Linphone and always works. The **media (RTP/SRTP)** must
 be able to flow back to the container:
 
-- **Linux** — `--network host` (used above) puts the container on the host network, so
-  pjsua's RTP ports are directly reachable. This is the simplest and most reliable.
-- **Windows / macOS (Docker Desktop)** — Docker Desktop runs the engine inside a Linux VM,
-  where `--network host` does **not** expose host ports the same way. Pin the RTP port and
-  publish it as UDP:
+- **Linux / WSL2** — `--network host` (used above) puts the container on the host network, so
+  pjsua's RTP ports are directly reachable. Simplest and most reliable.
+- **Windows / macOS (Docker Desktop)** — the engine runs inside a NAT'd Linux VM where
+  **neither `--network host` nor `-p` port-publishing delivers the return RTP** — you get
+  one-way audio (you hear the agent; your reply never arrives). The fix is **STUN**: set
+  `VOICE_STUN` so pjsua discovers and advertises its **public** address, and use plain bridge
+  networking:
 
   ```bash
   docker run -i --rm \
-    -e VOICE_RTP_PORT=4000 -p 4000:4000/udp -p 4001:4001/udp \
+    -e VOICE_STUN=stun.l.google.com:19302 \
     --env-file voice.docker.env ringback
   ```
 
-  Linphone is a hosted SIP service that does symmetric RTP, so outbound-initiated media
-  returns over the same mapping. **Tested working on Docker Desktop for Mac** with exactly
-  the port mapping above — a real call connected with clean **two-way** audio (Piper TTS
-  out, whisper capture in). If you do hit **one-way or no audio** on your network, that's
-  an RTP/NAT edge — prefer **WSL2** on Windows (host networking; see
-  [SETUP_WINDOWS.md](SETUP_WINDOWS.md)) or the native Linux setup.
+  Verified two-way audio + barge-in on Docker Desktop for Mac (Apple Silicon) this way. STUN
+  only discovers your public address (one tiny handshake at call setup); no call audio passes
+  through it. Use `stun.linphone.org` if you'd rather not use Google's. The **Claude Code
+  plugin sets `VOICE_STUN` automatically**, so this is only needed for a manual `docker run`.
 
 ## Slimming / overriding models
 

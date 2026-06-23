@@ -11,6 +11,11 @@
     "mcp", "voice", "phone", "sip", "claude", "human-in-the-loop",
     "notifications", "whisper", "tts", "agent", "docker"
   ],
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [ { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/prepull.sh\"" } ] }
+    ]
+  },
   "userConfig": {
     "sip_id": {
       "type": "string",
@@ -40,6 +45,12 @@
       "type": "string",
       "title": "Caller-ID name (optional)",
       "description": "Name shown on your phone when the agent calls, e.g. My Claude."
+    },
+    "stun_server": {
+      "type": "string",
+      "title": "STUN server",
+      "description": "Used to discover the container's public address so two-way audio works through Docker's NAT. The default works for everyone; change it only if you prefer another (e.g. stun.linphone.org).",
+      "default": "stun.l.google.com:19302"
     },
     "alert_channel": {
       "type": "string",
